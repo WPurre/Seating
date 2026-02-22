@@ -1,17 +1,95 @@
 <!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Seating Generator</title>
-    <link rel="stylesheet" href="style.css" />
-  </head>
-  <body>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Seating Generator</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
     <h1>Seating Generator</h1>
 
-    <button id="btn">Click me</button>
-    <div id="out"></div>
+    <div class="topbar-right">
+      <button id="btnToggleMode" class="secondary">Switch to Student View</button>
+      <button id="btnGenerate" class="primary">Generate</button>
+    </div>
+  </header>
 
-    <script src="script.js"></script>
-  </body>
+  <!-- TEACHER VIEW -->
+  <section id="teacherView" class="panel">
+    <div class="grid2">
+      <div class="card">
+        <h2>Names</h2>
+        <p class="hint">One name per line.</p>
+        <textarea id="namesInput" rows="12" placeholder="Alice&#10;Bob&#10;Charlie"></textarea>
+        <div class="row" style="margin-top:10px;">
+          <button id="btnUpdateNames" class="secondary">Update dropdowns</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Restrictions</h2>
+        <p class="hint">
+          Add rules without showing them in Student View.
+        </p>
+
+        <div class="row" style="margin-bottom:10px;">
+          <button id="btnAddRestriction" class="secondary">Add restriction</button>
+          <button id="btnClearRestrictions" class="secondary">Clear all</button>
+        </div>
+
+        <div id="restrictionsList" class="restrictions-list"></div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h2>Classroom layout</h2>
+        <div class="row">
+          <label>Rows <input id="rowsInput" type="number" min="1" max="30" value="7"></label>
+          <label>Cols <input id="colsInput" type="number" min="1" max="30" value="10"></label>
+          <button id="btnBuildLayout" class="secondary">Build / Resize Grid</button>
+        </div>
+
+        <p class="hint">
+          Click cells to toggle Seat/Empty. Use Empty cells as gaps/aisles (like the classroom).
+        </p>
+
+        <div class="row" style="margin-bottom:8px;">
+          <span class="chip">Detected desk pairs: <b id="pairCount">0</b></span>
+          <span class="chip">Detected gap-adjacent links: <b id="gapCount">0</b></span>
+        </div>
+
+        <div id="seatEditor" class="seat-grid"></div>
+      </div>
+
+      <div class="card">
+        <h2>Privacy</h2>
+        <p class="hint">
+          Student View hides everything except the seating chart. Optional PIN prevents switching back.
+        </p>
+
+        <div class="row">
+          <label>Teacher PIN (optional)
+            <input id="pinInput" type="password" placeholder="e.g. 1234">
+          </label>
+          <button id="btnSave" class="secondary">Save Setup</button>
+        </div>
+
+        <div id="status" class="status"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- STUDENT VIEW -->
+  <section id="studentView" class="panel hidden">
+    <div class="card">
+      <h2>Seating chart</h2>
+      <div id="seatingGrid" class="seat-grid"></div>
+    </div>
+  </section>
+
+  <script src="script.js"></script>
+</body>
 </html>
