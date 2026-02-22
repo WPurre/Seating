@@ -108,6 +108,567 @@ function rcToIndex(r, c, cols) {
   return r * cols + c;
 }
 
+function seatPreferenceScore(seatIdx) {
+  // Higher is better.
+  // Priority: further up (smaller row) and closer to the middle.
+  const { r, c } = indexToRC(seatIdx, layout.cols);
+  const mid = (layout.cols - 1) / 2;
+  const distMid = Math.abs(c - mid);
+
+  // Big weight on row so "further up" wins ties, then middle.
+  // (Negative r because smaller r is better.)
+  return (-r * 100) - distMid;
+}
+
+function colorForComponent(compId) {
+  // Stable-ish, readable palette. (Teacher view only.)
+  const palette = [
+    "#2563eb", "#16a34a", "#dc2626", "#7c3aed",
+    "#0f766e", "#ea580c", "#0891b2", "#9333ea"
+  ];
+  return palette[Math.abs(compId) % palette.length];
+}
+
+function pickSeatSubset(seatsToFill, count, directAdj, componentId, alreadyUsedInComponent, attempt) {
+  // We need to choose which seats get assigned when there are more seats than students.
+  // New goal (cluster-based):
+  //  - Prefer seats further up and near the middle
+  //  - Avoid "lonely" used clusters: if a seat cluster is used at all, try to use >= 2 seats
+  //    in that cluster (unless it's impossible).
+  //
+  // Note:
+  //  - "Cluster" means connected component under orthogonal adjacency (same as directAdj).
+  //  - alreadyUsedInComponent counts pinned seats already placed in solveOnce.
+
+  if (count <= 0) return [];
+  if (count >= seatsToFill.length) return seatsToFill.slice();
+
+  const preferred = seatsToFill.slice().sort((a, b) => seatPreferenceScore(b) - seatPreferenceScore(a));
+  const selected = new Set();
+
+  // Per-component bookkeeping
+  const compAvail = new Map();
+  const compSelected = new Map();
+  for (const idx of seatsToFill) {
+    const cid = componentId[idx];
+    if (cid === -1) continue;
+    if (!compAvail.has(cid)) compAvail.set(cid, []);
+    compAvail.get(cid).push(idx);
+  }
+  for (const [cid, list] of compAvail.entries()) {
+    list.sort((a, b) => seatPreferenceScore(b) - seatPreferenceScore(a));
+    compSelected.set(cid, 0);
+  }
+
+  const jitter = (attempt || 0) % 9;
+
+  function totalUsedInComp(cid) {
+    return (alreadyUsedInComponent.get(cid) || 0) + (compSelected.get(cid) || 0);
+  }
+
+  function addSeat(idx) {
+    if (selected.has(idx)) return;
+    selected.add(idx);
+    const cid = componentId[idx];
+    if (cid !== -1) compSelected.set(cid, (compSelected.get(cid) || 0) + 1);
+  }
+
+  // 1) If any component already has exactly one pinned student, try to add one more seat there first.
+  //    (This directly matches the "no one sits alone in a used cluster" intent.)
+  const compIds = Array.from(compAvail.keys());
+  compIds.sort((a, b) => (seatPreferenceScore(compAvail.get(b)[0]) - seatPreferenceScore(compAvail.get(a)[0])));
+
+  for (const cid of compIds) {
+    if (selected.size >= count) break;
+    const used = totalUsedInComp(cid);
+    if (used !== 1) continue;
+
+    const candidates = compAvail.get(cid) || [];
+    // Pick best available seat in that component.
+    for (const idx of candidates) {
+      if (selected.has(idx)) continue;
+      addSeat(idx);
+      break;
+    }
+  }
+
+  // 2) Add seats in PAIRS within the same component when possible.
+  //    This keeps clusters from ending up with a single student.
+  function bestPairInComponent(cid) {
+    const list = compAvail.get(cid) || [];
+    let best = null;
+    let bestScore = -Infinity;
+
+    // Consider only a small prefix for performance / predictability.
+    const consider = Math.min(list.length, 10 + jitter * 2);
+    for (let i = 0; i < consider; i++) {
+      const a = list[i];
+      if (selected.has(a)) continue;
+      for (let j = i + 1; j < consider; j++) {
+        const b = list[j];
+        if (selected.has(b)) continue;
+
+        // Prefer actual direct neighbors, but allow any two seats in the same component.
+        const neighborBonus = (directAdj.get(a) || []).includes(b) ? 60 : 0;
+        const score = seatPreferenceScore(a) + seatPreferenceScore(b) + neighborBonus;
+        if (score > bestScore) {
+          bestScore = score;
+          best = [a, b];
+        }
+      }
+    }
+    return best;
+  }
+
+  while (selected.size + 1 < count) {
+    // Find the best pair among all components.
+    let bestPair = null;
+    let bestScore = -Infinity;
+
+    for (const cid of compIds) {
+      const pair = bestPairInComponent(cid);
+      if (!pair) continue;
+      const score = seatPreferenceScore(pair[0]) + seatPreferenceScore(pair[1]);
+      if (score > bestScore) {
+        bestScore = score;
+        bestPair = pair;
+      }
+    }
+
+    if (!bestPair) break;
+
+    addSeat(bestPair[0]);
+    if (selected.size < count) addSeat(bestPair[1]);
+  }
+
+  // 3) If we still need one seat (odd count), try to add it to a component that will not become lonely.
+  if (selected.size < count) {
+    let bestIdx = -1;
+    let bestScore = -Infinity;
+
+    const considerN = Math.min(preferred.length, 20 + jitter * 3);
+    for (let i = 0; i < considerN; i++) {
+      const idx = preferred[i];
+      if (selected.has(idx)) continue;
+
+      const cid = componentId[idx];
+      const usedBefore = (cid === -1) ? 0 : totalUsedInComp(cid);
+
+      // We don't want to start a new used component with exactly 1 seat if we can avoid it.
+      // So we prefer seats where usedBefore >= 1 (so adding this yields >=2), or components
+      // that are singletons anyway.
+      let penalty = 0;
+      if (cid !== -1) {
+        const availCount = (compAvail.get(cid) || []).length + (alreadyUsedInComponent.get(cid) || 0);
+        const isSingletonComponent = (availCount <= 1);
+        if (!isSingletonComponent && usedBefore === 0) penalty = 250;
+      }
+
+      const score = seatPreferenceScore(idx) - penalty;
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = idx;
+      }
+    }
+
+    if (bestIdx === -1) {
+      for (const idx of preferred) {
+        if (!selected.has(idx)) {
+          bestIdx = idx;
+          break;
+        }
+      }
+    }
+
+    addSeat(bestIdx);
+  }
+
+  // 4) Final cleanup: if we ended up with a lonely used component and we still have slack,
+  //    try a small swap to fix it.
+  //    This only runs in the "more seats than students" case, so it can't make things worse.
+  //
+  //    Lonely used component = used seats in component is exactly 1, but component has >=2 seats.
+  const selectedArr = Array.from(selected);
+  const selectedSet = new Set(selectedArr);
+
+  function componentTotalSeats(cid) {
+    const avail = (compAvail.get(cid) || []).length;
+    const pinned = (alreadyUsedInComponent.get(cid) || 0);
+    return avail + pinned;
+  }
+
+  function findLonelySelectedSeat() {
+    for (const idx of selectedArr) {
+      const cid = componentId[idx];
+      if (cid === -1) continue;
+      if (componentTotalSeats(cid) < 2) continue;
+      if (totalUsedInComp(cid) === 1) return idx;
+    }
+    return -1;
+  }
+
+  // One swap attempt is usually enough.
+  const lonelySeat = findLonelySelectedSeat();
+  if (lonelySeat !== -1) {
+    const lonelyCid = componentId[lonelySeat];
+
+    // Find a replacement seat from a component that already has >= 1 used (or is singleton).
+    let replacement = -1;
+    let best = -Infinity;
+    for (const idx of preferred) {
+      if (selectedSet.has(idx)) continue;
+      const cid = componentId[idx];
+      if (cid === -1) continue;
+
+      const totalSeats = componentTotalSeats(cid);
+      const usedBefore = totalUsedInComp(cid);
+      const singleton = totalSeats <= 1;
+
+      if (!singleton && usedBefore === 0) continue; // would create a new lonely cluster
+      const score = seatPreferenceScore(idx);
+      if (score > best) {
+        best = score;
+        replacement = idx;
+      }
+    }
+
+    if (replacement !== -1) {
+      selected.delete(lonelySeat);
+      selected.add(replacement);
+    }
+  }
+
+  return Array.from(selected);
+}
+
+function ensureClusterOverlaySvg(containerEl) {
+  let svg = containerEl.querySelector(".cluster-overlay");
+  if (!svg) {
+    svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.classList.add("cluster-overlay");
+    svg.setAttribute("aria-hidden", "true");
+    containerEl.appendChild(svg);
+  }
+  return svg;
+}
+
+/**
+ * Draw cluster outlines with a thin black border, aligned using real DOM rects.
+ *
+ * Inputs:
+ * - containerEl: the grid container that contains the seat cells
+ * - componentId: array where componentId[seatIndex] = cluster id
+ * - getSeatElementByIndex: function (idx) => DOM element for that seat
+ *
+ * Notes:
+ * - This avoids drift by using getBoundingClientRect relative to the container.
+ * - You must be able to access the seat element for a given seat index.
+ */
+function drawClusterOutlinesSvg(containerEl, componentId, getSeatElementByIndex) {
+  const svg = ensureClusterOverlaySvg(containerEl);
+  svg.innerHTML = "";
+
+  const gridRect = containerEl.getBoundingClientRect();
+
+  // IMPORTANT: subtract border thickness so coordinates match the content box
+  const originX = containerEl.clientLeft;
+  const originY = containerEl.clientTop;
+
+  function rectRelativeToContainer(el) {
+    const r = el.getBoundingClientRect();
+    return {
+      x: (r.left - gridRect.left) - originX,
+      y: (r.top - gridRect.top) - originY,
+      w: r.width,
+      h: r.height
+    };
+  }
+
+  // Build components -> list of {r,c}
+  const byComp = new Map();
+  for (let idx = 0; idx < componentId.length; idx++) {
+    const cid = componentId[idx];
+    if (cid == null || cid === -1) continue;
+
+    const seatEl = getSeatElementByIndex(idx);
+    if (!seatEl) continue;              // safety
+    if (seatEl.classList.contains("empty")) continue;
+
+    if (!byComp.has(cid)) byComp.set(cid, []);
+    const r = Math.floor(idx / layout.cols);
+    const c = idx % layout.cols;
+    byComp.get(cid).push({ r, c });
+  }
+
+  // Map real pixel edges for each column and row using actual DOM measurements
+  const colEdges = new Map(); // c -> {left,right}
+  const rowEdges = new Map(); // r -> {top,bottom}
+
+  // Slight outward padding so the outline has equal breathing room on all sides
+  const pad = 2;
+
+  for (let idx = 0; idx < componentId.length; idx++) {
+    const seatEl = getSeatElementByIndex(idx);
+    if (!seatEl) continue;
+    if (seatEl.classList.contains("empty")) continue;
+
+    const r = Math.floor(idx / layout.cols);
+    const c = idx % layout.cols;
+    const rr = rectRelativeToContainer(seatEl);
+
+    if (!colEdges.has(c)) colEdges.set(c, { left: rr.x - pad, right: rr.x + rr.w + pad });
+    if (!rowEdges.has(r)) rowEdges.set(r, { top: rr.y - pad, bottom: rr.y + rr.h + pad });
+  }
+
+  function xEdge(x) {
+    if (colEdges.has(x)) return colEdges.get(x).left;       // left edge of col x
+    if (colEdges.has(x - 1)) return colEdges.get(x - 1).right; // right edge of col x-1
+    return 0;
+  }
+
+  function yEdge(y) {
+    if (rowEdges.has(y)) return rowEdges.get(y).top;
+    if (rowEdges.has(y - 1)) return rowEdges.get(y - 1).bottom;
+    return 0;
+  }
+
+  // Size SVG to container content box
+  const width = containerEl.clientWidth;
+  const height = containerEl.clientHeight;
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+
+  // Draw paths (thin black)
+  for (const [cid, cells] of byComp.entries()) {
+    const loops = buildComponentOutlineLoops(cells);
+
+    for (const loop of loops) {
+      if (!loop || loop.length < 3) continue;
+
+      let d = "";
+      for (let i = 0; i < loop.length; i++) {
+        const p = loop[i];
+        const x = xEdge(p.x);
+        const y = yEdge(p.y);
+        d += (i === 0) ? `M ${x} ${y}` : ` L ${x} ${y}`;
+      }
+      d += " Z";
+
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", d);
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke", "#111");
+      path.setAttribute("stroke-width", "2");        // thinner black border
+      path.setAttribute("stroke-linejoin", "round");
+      path.setAttribute("stroke-linecap", "round");
+      svg.appendChild(path);
+    }
+  }
+}
+
+function buildComponentOutlineLoops(componentCells) {
+  // componentCells: array of {r,c} grid coordinates.
+  // We build the perimeter as loops of integer grid points.
+
+  const cellSet = new Set(componentCells.map(p => `${p.r},${p.c}`));
+  const segments = []; // each: [x1,y1,x2,y2] in grid-units
+
+  function hasCell(r, c) {
+    return cellSet.has(`${r},${c}`);
+  }
+
+  for (const { r, c } of componentCells) {
+    // Top edge
+    if (!hasCell(r - 1, c)) segments.push([c, r, c + 1, r]);
+    // Bottom
+    if (!hasCell(r + 1, c)) segments.push([c, r + 1, c + 1, r + 1]);
+    // Left
+    if (!hasCell(r, c - 1)) segments.push([c, r, c, r + 1]);
+    // Right
+    if (!hasCell(r, c + 1)) segments.push([c + 1, r, c + 1, r + 1]);
+  }
+
+  // Build adjacency from segments
+  const nextByPoint = new Map(); // "x,y" -> array of {x,y}
+  const unused = new Set();
+
+  function pkey(x, y) {
+    return `${x},${y}`;
+  }
+
+  function ekey(x1, y1, x2, y2) {
+    return `${x1},${y1}|${x2},${y2}`;
+  }
+
+  for (const [x1, y1, x2, y2] of segments) {
+    const a = pkey(x1, y1);
+    const b = pkey(x2, y2);
+    if (!nextByPoint.has(a)) nextByPoint.set(a, []);
+    if (!nextByPoint.has(b)) nextByPoint.set(b, []);
+    nextByPoint.get(a).push({ x: x2, y: y2 });
+    nextByPoint.get(b).push({ x: x1, y: y1 });
+    unused.add(ekey(x1, y1, x2, y2));
+    unused.add(ekey(x2, y2, x1, y1));
+  }
+
+  const loops = [];
+
+  while (unused.size > 0) {
+    // Pick any unused directed edge as a starting point
+    const first = unused.values().next().value;
+    const [aStr, bStr] = first.split("|");
+    const [sx, sy] = aStr.split(",").map(Number);
+    const [nx, ny] = bStr.split(",").map(Number);
+
+    const loop = [{ x: sx, y: sy }];
+    let prev = { x: sx, y: sy };
+    let cur = { x: nx, y: ny };
+    unused.delete(first);
+
+    // Walk until we return to start
+    const guardMax = segments.length * 4 + 20;
+    let guard = 0;
+    while (guard++ < guardMax) {
+      loop.push({ x: cur.x, y: cur.y });
+      if (cur.x === sx && cur.y === sy) break;
+
+      const options = nextByPoint.get(pkey(cur.x, cur.y)) || [];
+      // Choose the next point that continues an unused edge.
+      let chosen = null;
+      for (const opt of options) {
+        if (opt.x === prev.x && opt.y === prev.y) continue;
+        const k = ekey(cur.x, cur.y, opt.x, opt.y);
+        if (unused.has(k)) {
+          chosen = opt;
+          break;
+        }
+      }
+
+      // Fallback: allow going back if it's the only way.
+      if (!chosen) {
+        for (const opt of options) {
+          const k = ekey(cur.x, cur.y, opt.x, opt.y);
+          if (unused.has(k)) {
+            chosen = opt;
+            break;
+          }
+        }
+      }
+
+      if (!chosen) break;
+
+      const usedKey = ekey(cur.x, cur.y, chosen.x, chosen.y);
+      unused.delete(usedKey);
+      prev = cur;
+      cur = { x: chosen.x, y: chosen.y };
+    }
+
+    if (loop.length >= 4) loops.push(loop);
+  }
+
+  return loops;
+}
+
+function drawTeacherClusterOutlines(containerEl, pairAdj, componentId) {
+  // Draw outlines for connected components of seats (orthogonal adjacency).
+  // Uses an SVG overlay so outlines can bridge grid gaps cleanly.
+
+  function getSeatElementByIndex(idx) {
+    return containerEl.querySelector(`[data-index="${idx}"]`);
+  }
+
+  drawClusterOutlinesSvg(containerEl, componentId, getSeatElementByIndex);
+  return;
+  // Remove old overlay paths
+  const svg = ensureClusterOverlaySvg(containerEl);
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+  // Determine geometry using the actual DOM positions.
+  // This avoids subtle drift where the SVG path can end up slightly down/right
+  // compared to the seats (browser rounding, scaling, etc.).
+  const style = window.getComputedStyle(containerEl);
+  const gap = parseFloat(style.gap || style.columnGap || "0") || 0;
+
+  const anyCell = containerEl.querySelector(".seat");
+  if (!anyCell) return;
+
+  // Use offset-based measurements so everything is in the container's coordinate space.
+  const cellW = anyCell.offsetWidth;
+  const cellH = anyCell.offsetHeight;
+
+  function cellElAt(r, c) {
+    const idx = rcToIndex(r, c, layout.cols);
+    return containerEl.querySelector(`[data-index="${idx}"]`);
+  }
+
+  const cell00 = cellElAt(0, 0) || anyCell;
+  const originX = cell00.offsetLeft;
+  const originY = cell00.offsetTop;
+
+  // Prefer measured deltas between neighboring cells if possible.
+  let unitX = cellW + gap;
+  let unitY = cellH + gap;
+
+  if (layout.cols > 1) {
+    const cell01 = cellElAt(0, 1);
+    if (cell01) unitX = cell01.offsetLeft - cell00.offsetLeft;
+  }
+
+  if (layout.rows > 1) {
+    const cell10 = cellElAt(1, 0);
+    if (cell10) unitY = cell10.offsetTop - cell00.offsetTop;
+  }
+
+  // Use the container's actual pixel size for the SVG coordinate space.
+  const width = containerEl.clientWidth;
+  const height = containerEl.clientHeight;
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("preserveAspectRatio", "none");
+
+  // Build components -> list of cells
+  const byComp = new Map();
+  for (let i = 0; i < layout.exists.length; i++) {
+    if (!layout.exists[i]) continue;
+    const cid = componentId[i];
+    if (cid === -1) continue;
+    if (!byComp.has(cid)) byComp.set(cid, []);
+    const { r, c } = indexToRC(i, layout.cols);
+    byComp.get(cid).push({ r, c });
+  }
+
+  for (const [cid, cells] of byComp.entries()) {
+    const loops = buildComponentOutlineLoops(cells);
+
+    const isIsolated = (cells.length === 1) && ((pairAdj.get(rcToIndex(cells[0].r, cells[0].c, layout.cols)) || []).length === 0);
+
+    for (const loop of loops) {
+      let d = "";
+      for (let k = 0; k < loop.length; k++) {
+        const p = loop[k];
+        // Convert grid-unit corner points to pixel coordinates.
+        // Note: corners are at cell boundaries, so (p.x, p.y) refers to the boundary
+        // before column p.x / row p.y.
+        const x = originX + p.x * unitX;
+        const y = originY + p.y * unitY;
+        d += (k === 0) ? `M ${x} ${y}` : ` L ${x} ${y}`;
+      }
+      d += " Z";
+
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", d);
+      path.setAttribute("fill", "none");
+      // User preference: a subtle, consistent black border (not one color per table).
+      path.setAttribute("stroke", "#111");
+      path.setAttribute("stroke-width", "2");
+      path.setAttribute("stroke-linejoin", "round");
+      path.setAttribute("stroke-linecap", "round");
+      path.setAttribute("opacity", "0.75");
+      if (isIsolated) path.setAttribute("stroke-dasharray", "6 6");
+      svg.appendChild(path);
+    }
+  }
+}
+
 function edgeKey(i, j) {
   return i < j ? `${i}|${j}` : `${j}|${i}`;
 }
@@ -396,6 +957,11 @@ function renderStudentView() {
 function renderSeatEditor() {
   ensureParallelArrays();
 
+  // Teacher-only grouping visuals: highlight adjacent "tables" (connected seat groups)
+  const { pairEdges } = recomputeGraphs();
+  const pairAdj = buildAdjacencyFromEdges(pairEdges);
+  const compId = computeSeatComponents(pairAdj);
+
   // Teacher draft: start from published seating, but overlay fixed students (teacher-only visibility)
   const draft = publishedAssignment.slice();
   ensureFixedStudentsVisibleInTeacherDraft(draft);
@@ -418,6 +984,7 @@ function renderSeatEditor() {
 
   for (let i = 0; i < layout.exists.length; i++) {
     const cell = document.createElement("div");
+    cell.dataset.index = String(i);
 
     // Gap cell: clicking adds a seat
     if (!layout.exists[i]) {
@@ -444,6 +1011,14 @@ function renderSeatEditor() {
 
     // Seat cell: show draft name or "Seat"
     cell.className = "seat";
+
+    // Mark group membership for teacher view (visualized by SVG overlay)
+    const cid = compId[i];
+    if (cid !== -1) {
+      cell.classList.add("group");
+      const nbs = pairAdj.get(i) || [];
+      if (nbs.length === 0) cell.classList.add("isolated");
+    }
 
     const pinned = fixedStudentBySeat[i] || "";
     const nameHere = draft[i] || "";
@@ -481,6 +1056,9 @@ function renderSeatEditor() {
 
     seatEditor.appendChild(cell);
   }
+
+  // Draw SVG cluster outlines last (so it can bridge grid gaps)
+  drawTeacherClusterOutlines(seatEditor, pairAdj, compId);
 }
 
 function trySwapOrMoveInTeacherDraft(fromIdx, toIdx) {
@@ -937,6 +1515,7 @@ function generateSeating() {
   let best = null;
   let bestLonely = Infinity;
   let bestAdjPairs = -Infinity;
+  let bestSeatQuality = -Infinity;
 
   for (let attempt = 0; attempt < MAX_SOLVES; attempt++) {
     const candidate = solveOnce({
@@ -948,16 +1527,22 @@ function generateSeating() {
       gapAdj,
       directAdj,
       componentId,
-      isForbiddenInDeskGroup
+      isForbiddenInDeskGroup,
+      attempt
     });
 
     if (!candidate) continue;
 
-    const score = scoreSolution(candidate, directAdj);
-    if (score.lonely < bestLonely || (score.lonely === bestLonely && score.adjPairs > bestAdjPairs)) {
+    const score = scoreSolution(candidate, directAdj, componentId);
+    if (
+      score.lonely < bestLonely ||
+      (score.lonely === bestLonely && score.adjPairs > bestAdjPairs) ||
+      (score.lonely === bestLonely && score.adjPairs === bestAdjPairs && score.seatQuality > bestSeatQuality)
+    ) {
       best = candidate;
       bestLonely = score.lonely;
       bestAdjPairs = score.adjPairs;
+      bestSeatQuality = score.seatQuality;
       if (bestLonely === 0) break;
     }
   }
@@ -980,14 +1565,14 @@ function generateSeating() {
   renderSeatEditor();
   saveSetup();
 
-  if (bestLonely === 0) setStatus("Generated (no lonely students).");
-  else setStatus(`Generated (lonely students: ${bestLonely}).`);
+  if (bestLonely === 0) setStatus("Generated (no lonely clusters).");
+  else setStatus(`Generated (lonely clusters: ${bestLonely}).`);
 }
 
 function solveOnce(ctx) {
   const seatIndices = ctx.seatIndices.slice();
   const names = ctx.studentNames.slice();
-  shuffleInPlace(seatIndices);
+  // Keep some randomness so repeated attempts explore different valid assignments.
   shuffleInPlace(names);
 
   const assignment = new Array(layout.exists.length).fill("");
@@ -1010,20 +1595,40 @@ function solveOnce(ctx) {
   // Fill seats excluding pinned ones
   const seatsToFill = seatIndices.filter(i => !assignment[i]);
 
+  // Count already-used (pinned) seats per component so we can avoid lonely used clusters
+  const alreadyUsedInComponent = new Map();
+  for (let i = 0; i < assignment.length; i++) {
+    if (!assignment[i]) continue;
+    const cid = ctx.componentId[i];
+    if (cid === -1) continue;
+    alreadyUsedInComponent.set(cid, (alreadyUsedInComponent.get(cid) || 0) + 1);
+  }
+
   // Only place students that are not already pinned
   const remainingStudents = names.filter(n => !used.has(n));
 
   // If there are more remaining students than available seats, impossible
   if (remainingStudents.length > seatsToFill.length) return null;
 
-  // We only need to assign as many seats as we have remaining students
-  const seatsToAssign = seatsToFill.slice(0, remainingStudents.length);
+  // We only need to assign as many seats as we have remaining students.
+  // If there are more seats than students, pick the "best" subset of seats:
+  // - closer to front + middle
+  // - try to avoid creating isolated seats
+  const seatsToAssign = pickSeatSubset(
+    seatsToFill,
+    remainingStudents.length,
+    ctx.directAdj,
+    ctx.componentId,
+    alreadyUsedInComponent,
+    ctx.attempt
+  );
 
-  // Heuristic: fill more constrained seats first (keep it on the seats we actually assign)
+  // Place more constrained seats first (helps backtracking).
   seatsToAssign.sort((a, b) => {
     const da = (ctx.directAdj.get(a) || []).length;
     const db = (ctx.directAdj.get(b) || []).length;
-    return da - db;
+    if (da !== db) return da - db;
+    return seatPreferenceScore(b) - seatPreferenceScore(a);
   });
 
   function seatOfStudent(name) {
@@ -1135,13 +1740,30 @@ function solveOnce(ctx) {
   return assignment;
 }
 
-function scoreSolution(assignment, directAdj) {
-  let lonely = 0;
+function scoreSolution(assignment, directAdj, componentId) {
+  // "Lonely" is evaluated per CLUSTER (connected component of seats), not per seat.
+  // If a cluster is used at all, we prefer to have >= 2 students in that cluster.
+  // (If a cluster has only 1 seat total, then 1 student there is unavoidable.)
+
+  let lonely = 0; // number of lonely *clusters*
   let adjPairs = 0;
+  let seatQuality = 0;
+
+  const usedByComp = new Map();
+  const totalByComp = new Map();
+
+  for (let i = 0; i < layout.exists.length; i++) {
+    if (!layout.exists[i]) continue;
+    const cid = componentId[i];
+    if (cid === -1) continue;
+    totalByComp.set(cid, (totalByComp.get(cid) || 0) + 1);
+  }
 
   for (let i = 0; i < assignment.length; i++) {
     if (!assignment[i]) continue;
     if (!layout.exists[i]) continue;
+
+    seatQuality += seatPreferenceScore(i);
 
     const nbs = directAdj.get(i) || [];
     let hasNeighbor = false;
@@ -1153,10 +1775,18 @@ function scoreSolution(assignment, directAdj) {
       }
     }
 
-    if (!hasNeighbor) lonely++;
+    // Track per-cluster occupancy
+    const cid = componentId[i];
+    if (cid !== -1) usedByComp.set(cid, (usedByComp.get(cid) || 0) + 1);
   }
 
-  return { lonely, adjPairs };
+  // A used cluster is lonely if it has exactly 1 student but at least 2 seats in total.
+  for (const [cid, usedCount] of usedByComp.entries()) {
+    const totalSeats = totalByComp.get(cid) || 0;
+    if (totalSeats >= 2 && usedCount === 1) lonely++;
+  }
+
+  return { lonely, adjPairs, seatQuality };
 }
 
 // -------------------------
