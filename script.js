@@ -20,6 +20,7 @@ const btnGenerate = document.getElementById("btnGenerate");
 const btnBuildLayout = document.getElementById("btnBuildLayout");
 const btnSave = document.getElementById("btnSave");
 const btnUpdateNames = document.getElementById("btnUpdateNames");
+const btnDownloadPng = document.getElementById("btnDownloadPng");
 
 const btnAddRestriction = document.getElementById("btnAddRestriction");
 const btnClearRestrictions = document.getElementById("btnClearRestrictions");
@@ -55,6 +56,119 @@ let lastAssignment = []; // array length rows*cols, "" for empty/unassigned
 // -------------------------
 // Helpers
 // -------------------------
+
+function downloadSeatingAsPng() {
+  // We export what is currently displayed / saved as lastAssignment.
+  // If lastAssignment isn't initialized properly, fall back to empty.
+  const assignment = (Array.isArray(lastAssignment) && lastAssignment.length === layout.exists.length)
+    ? lastAssignment
+    : new Array(layout.exists.length).fill("");
+
+  const rows = layout.rows;
+  const cols = layout.cols;
+
+  // Drawing settings (tweak if you want)
+  const cellW = 220;
+  const cellH = 80;
+  const gap = 14;
+  const pad = 30;
+
+  const title = "Seating chart";
+  const dateStr = new Date().toLocaleString();
+
+  const headerH = 70;
+
+  const width = pad * 2 + cols * cellW + (cols - 1) * gap;
+  const height = pad * 2 + headerH + rows * cellH + (rows - 1) * gap;
+
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+
+  // Make it sharp on HiDPI screens
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.floor(width * dpr);
+  canvas.height = Math.floor(height * dpr);
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  ctx.scale(dpr, dpr);
+
+  // Background
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+
+  // Header
+  ctx.fillStyle = "#111111";
+  ctx.font = "600 24px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
+  ctx.fillText(title, pad, pad + 26);
+
+  ctx.fillStyle = "#444444";
+  ctx.font = "400 14px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
+  ctx.fillText(dateStr, pad, pad + 50);
+
+  // Grid
+  const startY = pad + headerH;
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const idx = r * cols + c;
+
+      const x = pad + c * (cellW + gap);
+      const y = startY + r * (cellH + gap);
+
+      const isSeat = !!layout.exists[idx];
+      if (!isSeat) {
+        // Draw nothing for gaps (keeps the “aisle” look)
+        continue;
+      }
+
+      // Seat box
+      ctx.fillStyle = "#ffffff";
+      ctx.strokeStyle = "#d5d9e3";
+      ctx.lineWidth = 2;
+
+      roundRect(ctx, x, y, cellW, cellH, 14);
+      ctx.fill();
+      ctx.stroke();
+
+      // Name text
+      const name = assignment[idx] || "";
+      ctx.fillStyle = "#111111";
+      ctx.font = "500 18px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
+
+      // If very long name, shrink slightly
+      const maxTextWidth = cellW - 20;
+      let fontSize = 18;
+      while (fontSize > 12) {
+        ctx.font = `500 ${fontSize}px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif`;
+        if (ctx.measureText(name).width <= maxTextWidth) break;
+        fontSize--;
+      }
+
+      ctx.fillText(name, x + cellW / 2, y + cellH / 2);
+    }
+  }
+
+  // Download
+  const a = document.createElement("a");
+  const safeDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  a.download = `seating_chart_${safeDate}.png`;
+  a.href = canvas.toDataURL("image/png");
+  a.click();
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + w, y, x + w, y + h, radius);
+  ctx.arcTo(x + w, y + h, x, y + h, radius);
+  ctx.arcTo(x, y + h, x, y, radius);
+  ctx.arcTo(x, y, x + w, y, radius);
+  ctx.closePath();
+}
 
 function setStatus(msg) {
   statusEl.textContent = msg;
@@ -344,7 +458,7 @@ function addRestrictionRow(initial) {
 
   const nameOptions = studentNames.map(n => ({ value: n, label: n }));
   const typeOptions = [
-    { value: "PAIR", label: "Not in same desk pair" },
+    { value: "PAIR", label: "Not at same table" },
     { value: "GAP", label: "Not adjacent across a gap" }
   ];
 
@@ -689,6 +803,8 @@ btnClearRestrictions.addEventListener("click", () => {
   restrictionsList.innerHTML = "";
   restrictions = [];
 });
+
+btnDownloadPng.addEventListener("click", downloadSeatingAsPng);
 
 (function main() {
   const loaded = loadSetup();
