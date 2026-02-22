@@ -33,8 +33,8 @@ const seatingGrid = document.getElementById("seatingGrid");
 const pinInput = document.getElementById("pinInput");
 const statusEl = document.getElementById("status");
 
-const pairCountEl = document.getElementById("pairCount");
-const gapCountEl = document.getElementById("gapCount");
+const seatCountEl = document.getElementById("seatCount");
+const studentCountEl = document.getElementById("studentCount");
 
 let isStudentView = false;
 
@@ -135,7 +135,8 @@ function renderSeatEditor() {
     cell.textContent = layout.exists[i] ? "Seat" : "";
 
     cell.addEventListener("click", () => {
-  layout.exists[i] = !layout.exists[i];
+    layout.exists[i] = !layout.exists[i];
+    updateCounts();
 
   // NEW: if we turned this cell into a gap, clear any name assigned there
   if (!layout.exists[i]) {
@@ -171,6 +172,15 @@ function renderSeating(assignments) {
     seatingGrid.appendChild(cell);
   }
 }
+
+function updateCounts() {
+  const seatCount = layout.exists.filter(x => x).length;
+  const studentCount = parseNames(namesInput.value).length;
+
+  seatCountEl.textContent = String(seatCount);
+  studentCountEl.textContent = String(studentCount);
+}
+
 
 // -------------------------
 // Graph derivation (pair + gap adjacency)
@@ -240,8 +250,7 @@ function recomputeGraphsAndCounts() {
     }
   }
 
-  pairCountEl.textContent = String(seatGraphs.pairEdges.size);
-  gapCountEl.textContent = String(seatGraphs.gapEdges.size);
+  updateCounts();
 }
 
 
@@ -296,7 +305,7 @@ function refreshNamesFromTextarea() {
       addRestrictionRow(r);
     }
   }
-
+  updateCounts();
   setStatus(`Names updated. Students: ${studentNames.length}`);
 }
 
@@ -433,6 +442,7 @@ function loadSetup() {
     // 5) Render layout + graphs
     renderSeatEditor();
     recomputeGraphsAndCounts();
+    updateCounts();
 
     // 6) Restore restrictions AFTER we have names
     restrictionsList.innerHTML = "";
@@ -639,14 +649,14 @@ btnBuildLayout.addEventListener("click", () => {
   colsInput.value = c;
 
   initLayout(r, c);
-
+  
   lastAssignment = new Array(layout.exists.length).fill("");
   renderSeating(lastAssignment);
 
   renderSeatEditor();
   recomputeGraphsAndCounts();
   setStatus("Grid rebuilt. Click cells to place seats and gaps.");
-
+  updateCounts();
   // NEW: persist the new grid size + cleared assignment
   saveSetup();
 });
@@ -656,6 +666,8 @@ namesInput.addEventListener("input", () => {
   // but for typical classes this is fine
   saveSetup();
 });
+
+namesInput.addEventListener("input", updateCounts);
 
 pinInput.addEventListener("input", saveSetup);
 
@@ -691,7 +703,7 @@ btnClearRestrictions.addEventListener("click", () => {
     lastAssignment = new Array(layout.exists.length).fill("");
     renderSeating(lastAssignment);
   }
-
+  updateCounts();
 
   switchToStudentView();
 })();
