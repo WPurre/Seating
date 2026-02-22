@@ -28,6 +28,7 @@ const btnClearRestrictions = document.getElementById("btnClearRestrictions");
 const restrictionsList = document.getElementById("restrictionsList");
 
 const btnDownloadPng = document.getElementById("btnDownloadPng");
+const btnFlipView = document.getElementById("btnFlipView");
 
 const namesInput = document.getElementById("namesInput");
 const rowsInput = document.getElementById("rowsInput");
@@ -40,11 +41,14 @@ const statusEl = document.getElementById("status");
 const seatCountEl = document.getElementById("seatCount");
 const studentCountEl = document.getElementById("studentCount");
 
+
+
 // -------------------------
 // State
 // -------------------------
 
 let isStudentView = false;
+let studentViewFlipped = false;
 
 let layout = {
   rows: 7,
@@ -54,6 +58,8 @@ let layout = {
 
 let studentNames = [];   // parsed from textarea
 let restrictions = [];   // array of {a,b,type}
+
+
 
 // Published seating shown to students
 let publishedAssignment = []; // length rows*cols, "" if none
@@ -400,39 +406,56 @@ function drawClusterOutlinesSvg(containerEl, componentId, getSeatElementByIndex)
     byComp.get(cid).push({ r, c });
   }
 
-  // Map real pixel edges for each column and row using actual DOM measurements
-  const colEdges = new Map(); // c -> {left,right}
-  const rowEdges = new Map(); // r -> {top,bottom}
+    // --- Stable grid mapping (prevents "jumping" when you add/remove seats) ---
 
-  // Slight outward padding so the outline has equal breathing room on all sides
-  const pad = 2;
+  // Find a reference (non-empty) seat to measure cell size and infer the grid origin.
+  let refEl = null;
+  let refIdx = -1;
 
   for (let idx = 0; idx < componentId.length; idx++) {
     const seatEl = getSeatElementByIndex(idx);
     if (!seatEl) continue;
     if (seatEl.classList.contains("empty")) continue;
-
-    const r = Math.floor(idx / layout.cols);
-    const c = idx % layout.cols;
-    const rr = rectRelativeToContainer(seatEl);
-
-    if (!colEdges.has(c)) colEdges.set(c, { left: rr.x - pad, right: rr.x + rr.w + pad });
-    if (!rowEdges.has(r)) rowEdges.set(r, { top: rr.y - pad, bottom: rr.y + rr.h + pad });
+    refEl = seatEl;
+    refIdx = idx;
+    break;
   }
 
+  if (!refEl) return; // nothing to draw
+
+  const refRect = rectRelativeToContainer(refEl);
+  const refRow = Math.floor(refIdx / layout.cols);
+  const refCol = refIdx % layout.cols;
+
+  // Read actual CSS grid gaps. (.seat-grid uses gap: 8px)
+  const cs = getComputedStyle(containerEl);
+  const gapX = parseFloat(cs.columnGap || cs.gap || "0") || 0;
+  const gapY = parseFloat(cs.rowGap || cs.gap || "0") || 0;
+
+  const cellW = refRect.w;
+  const cellH = refRect.h;
+
+  const stepX = cellW + gapX;
+  const stepY = cellH + gapY;
+
+  // Infer where col 0 / row 0 starts inside this container (content-box coords)
+  const left0 = refRect.x - refCol * stepX;
+  const top0  = refRect.y - refRow * stepY;
+
+  // Slight outward padding so the outline is consistently "centered" vs gaps
+  // and doesn't touch the seat borders too tightly.
+  const pad = 5;
+
   function xEdge(x) {
-    if (colEdges.has(x)) return colEdges.get(x).left;       // left edge of col x
-    if (colEdges.has(x - 1)) return colEdges.get(x - 1).right; // right edge of col x-1
-    return 0;
+    return left0 + x * stepX - pad;
   }
 
   function yEdge(y) {
-    if (rowEdges.has(y)) return rowEdges.get(y).top;
-    if (rowEdges.has(y - 1)) return rowEdges.get(y - 1).bottom;
-    return 0;
+    return top0 + y * stepY - pad;
   }
 
-  // Size SVG to container content box
+  // And since we subtracted pad on the "top/left" edges, we should add it back
+  // by expanding the viewBox slightly so strokes aren't clipped at borders.
   const width = containerEl.clientWidth;
   const height = containerEl.clientHeight;
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -945,6 +968,7 @@ function renderStudentView() {
   ensureParallelArrays();
   seatingGrid.style.gridTemplateColumns = `repeat(${layout.cols}, minmax(60px, 1fr))`;
   seatingGrid.innerHTML = "";
+  seatingGrid.classList.toggle("flipped", !!studentViewFlipped);
 
   for (let i = 0; i < layout.exists.length; i++) {
     const cell = document.createElement("div");
@@ -1907,6 +1931,12 @@ btnBuildLayout.addEventListener("click", () => {
 btnSave.addEventListener("click", () => {
   saveSetup();
   setStatus("Saved.");
+});
+
+btnFlipView.addEventListener("click", () => {
+  studentViewFlipped = !studentViewFlipped;
+  renderStudentView();
+  saveSetup();
 });
 
 btnGenerate.addEventListener("click", generateSeating);
