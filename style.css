@@ -210,6 +210,15 @@ button:active {
   padding: 8px 10px;
 }
 
+/* Student view: flip the classroom while keeping names readable */
+.seat-grid.flipped {
+  transform: rotate(180deg);
+}
+
+.seat-grid.flipped .seat {
+  transform: rotate(180deg);
+}
+
 .chip {
   background: #f3f5f9;
   border: 1px solid #e6e8ee;
