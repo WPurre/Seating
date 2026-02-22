@@ -657,8 +657,8 @@ function addRestrictionRow(initial) {
   const blankOption = [{ value: "", label: "(none)" }];
 
   const typeOptions = [
-    { value: "PAIR", label: "Not in same connected desk group" },
-    { value: "GAP", label: "Not adjacent across a gap" },
+    { value: "PAIR", label: "Not at same table" },
+    { value: "GAP", label: "Not at adjacent tables" },
     { value: "MUST_DIRECT", label: "Must be directly adjacent" },
     { value: "FIXED_SEAT", label: "Specific seat" }
   ];
