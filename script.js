@@ -58,6 +58,7 @@ const importFile = document.getElementById("importFile");
 const namesMessages = document.getElementById("namesMessages");
 const attendanceList = document.getElementById("attendanceList");
 const btnAllPresent = document.getElementById("btnAllPresent");
+const leaveAbsentOutInput = document.getElementById("leaveAbsentOutInput");
 
 const btnAddRestriction = document.getElementById("btnAddRestriction");
 const btnClearRestrictions = document.getElementById("btnClearRestrictions");
@@ -114,8 +115,14 @@ let layout = {
 let studentNames = [];   // parsed from textarea (applied on change, see refreshNamesFromTextarea)
 let restrictions = [];   // array of {a,b,type}
 
-// Students marked absent. They keep their restrictions and pins but aren't seated.
+// Students marked absent. Attendance never changes an existing seating chart; it only
+// matters for groups, and for Generate when "leave absent students out" is checked.
 let absentStudents = new Set();
+
+// Students the current seating chart deliberately leaves out (absent when it was
+// generated with "leave absent students out"). They stay unseated until the next
+// Generate; everyone else in the class is kept seated (seatMissingStudents).
+let seatingLeftOut = new Set();
 
 // Every class's saved data: { currentId, teacherPin, classes: [{ id, data }] }, where
 // data is what saveSetup builds. See loadStore/saveSetup.
@@ -927,8 +934,8 @@ function renderAttendance() {
 }
 
 function setAbsent(names, absent) {
-  // Marking absent frees the student's seat; marking present seats them in a free seat.
-  // The rest of a published seating is kept either way.
+  // Attendance only affects groups (absent students leave their group, returning ones
+  // join one); the seating chart is never changed by it.
   const previouslyPresent = presentStudents();
   for (const n of names) {
     if (absent) absentStudents.add(n);
@@ -938,7 +945,6 @@ function setAbsent(names, absent) {
   let msg = absent
     ? `${names.join(", ")} marked absent.`
     : (names.length === 1 ? `${names[0]} marked present.` : "Everyone marked present.");
-  if (anyPublishedSeating()) msg += " " + syncPublishedWithPresent(previouslyPresent);
   const groupsMsg = syncGroupsWithPresent(previouslyPresent);
   if (groupsMsg) msg += " " + groupsMsg;
   renderGroups();
@@ -961,6 +967,7 @@ function anyPublishedSeating() {
 function clearPublishedSeating(reason) {
   ensureParallelArrays();
   publishedAssignment = new Array(layout.exists.length).fill("");
+  seatingLeftOut = new Set();
   renderStudentView();
   saveSetup();
   if (reason) setStatus(reason);
@@ -1263,7 +1270,7 @@ function ensureFixedStudentsVisibleInTeacherDraft(draft) {
   // free while they're away)
   for (let i = 0; i < fixedStudentBySeat.length; i++) {
     const s = fixedStudentBySeat[i];
-    if (!s || absentStudents.has(s)) continue;
+    if (!s || seatingLeftOut.has(s)) continue;
     if (!layout.exists[i]) continue;
     draft[i] = s;
   }
@@ -1354,7 +1361,7 @@ function renderSeatEditor() {
       if (nbs.length === 0) cell.classList.add("isolated");
     }
 
-    const pinned = (fixedStudentBySeat[i] && !absentStudents.has(fixedStudentBySeat[i])) ? fixedStudentBySeat[i] : "";
+    const pinned = (fixedStudentBySeat[i] && !seatingLeftOut.has(fixedStudentBySeat[i])) ? fixedStudentBySeat[i] : "";
     const nameHere = draft[i] || "";
 
     // Long names are cut off with an ellipsis (CSS); hover shows the full name.
@@ -1363,6 +1370,11 @@ function renderSeatEditor() {
     label.textContent = nameHere ? nameHere : "Seat";
     cell.appendChild(label);
     if (nameHere) cell.title = nameHere;
+    // Absent today: faded here only (Student View and the PNG show the chart as normal)
+    if (nameHere && absentStudents.has(nameHere)) {
+      cell.classList.add("is-absent");
+      cell.title = `${nameHere} (absent)`;
+    }
     if (pinned) {
       const pin = document.createElement("span");
       pin.className = "seat-pin";
@@ -1599,7 +1611,7 @@ function trySwapOrMoveInTeacherDraft(fromIdx, toIdx) {
   const toIsFixedStudent = toName ? fixedSet.has(toName) : false;
 
   // If target seat is pinned to some other (present) fixed student, block
-  const pins = activePins();
+  const pins = pinsExcept(seatingLeftOut);
   const pinnedTo = pins[toIdx];
   if (pinnedTo && pinnedTo !== fromName) {
     alert("That seat is fixed for a different student.");
@@ -1678,13 +1690,13 @@ function enforcePinsOnPublished() {
   cleanupFixedSeatsAgainstFixedStudents(fixedSet);
 
   // Remove fixed students from everywhere first, then place them at their fixed seat.
-  // Absent fixed students stay off the chart. Placing a pin can overwrite whoever sat
-  // there; syncPublishedWithPresent reseats them.
+  // Students the chart left out stay off it. Placing a pin can overwrite whoever sat
+  // there; seatMissingStudents reseats them.
   for (const s of fixedSet) removeStudentFromPublished(s);
 
   for (let i = 0; i < fixedStudentBySeat.length; i++) {
     const s = fixedStudentBySeat[i];
-    if (!s || absentStudents.has(s)) continue;
+    if (!s || seatingLeftOut.has(s)) continue;
     if (!layout.exists[i]) continue;
     if (!fixedSet.has(s)) continue;
     publishedAssignment[i] = s;
@@ -1720,6 +1732,9 @@ function refreshNamesFromTextarea() {
   for (const n of Array.from(absentStudents)) {
     if (!studentNames.includes(n)) absentStudents.delete(n);
   }
+  for (const n of Array.from(seatingLeftOut)) {
+    if (!studentNames.includes(n)) seatingLeftOut.delete(n);
+  }
 
   // Remove restrictions referencing missing students (except FIXED_SEAT uses only A)
   const old = restrictions.map(r => ({ a: r.a, b: r.b, type: r.type }));
@@ -1747,7 +1762,19 @@ function refreshNamesFromTextarea() {
   renderGroupRules();
 
   let msg = "Names updated.";
-  if (anyPublishedSeating()) msg += " " + syncPublishedWithPresent(oldPresent);
+  if (anyPublishedSeating()) {
+    // Removed names free their seat (reused first, so a renamed student keeps theirs)
+    const vacated = [];
+    for (const name of oldNames) {
+      if (studentNames.includes(name)) continue;
+      const idx = publishedAssignment.indexOf(name);
+      if (idx !== -1) {
+        publishedAssignment[idx] = "";
+        vacated.push(idx);
+      }
+    }
+    msg += " " + seatMissingStudents(vacated);
+  }
   const groupsMsg = syncGroupsWithPresent(oldPresent);
   if (groupsMsg) msg += " " + groupsMsg;
   renderGroups();
@@ -1759,40 +1786,35 @@ function refreshNamesFromTextarea() {
   setStatus(msg);
 }
 
-function activePins() {
-  // fixedStudentBySeat without absent students: their pinned seat is free while they're away
+function pinsExcept(excluded) {
+  // fixedStudentBySeat without the given students: their pinned seat counts as free
   ensureParallelArrays();
-  return fixedStudentBySeat.map(s => (s && !absentStudents.has(s)) ? s : "");
+  return fixedStudentBySeat.map(s => (s && !excluded.has(s)) ? s : "");
 }
 
-function syncPublishedWithPresent(oldPresent) {
-  // Keep the published seating in line with who is present, without reshuffling:
-  // students no longer present (removed or absent) leave their seat, everyone else stays
-  // put. Unseated present students first take a seat vacated in this update (so a
-  // renamed student keeps their seat), then the best free seat that avoids leaving
-  // someone alone at a table. Returns a status message.
-  const present = presentStudents();
-  const pins = activePins();
+function studentsToSeat() {
+  // Everyone in the class, except students the current chart deliberately left out
+  return studentNames.filter(n => !seatingLeftOut.has(n));
+}
 
-  const vacated = [];
-  for (const name of oldPresent) {
-    if (present.includes(name)) continue;
-    const idx = publishedAssignment.indexOf(name);
-    if (idx !== -1) {
-      publishedAssignment[idx] = "";
-      vacated.push(idx);
-    }
-  }
-  // Drop anyone else who shouldn't be seated (e.g. stale data)
+function seatMissingStudents(vacated = []) {
+  // Give a seat to every student who belongs in the published seating but has none
+  // (added since it was generated, or their seat was removed), without moving anyone
+  // else. Attendance plays no part. Pins are applied first, so a pinned student takes
+  // their seat and whoever sat there is reseated. Seats in `vacated` (freed in this
+  // update) are used first, so a renamed student keeps their seat; then the best free
+  // seat that avoids leaving someone alone at a table. Returns a status message.
+  const toSeat = studentsToSeat();
+  const pins = pinsExcept(seatingLeftOut);
+  vacated = vacated.slice();
+
+  // Drop anyone who shouldn't be seated (e.g. stale data)
   for (let i = 0; i < publishedAssignment.length; i++) {
-    if (publishedAssignment[i] && !present.includes(publishedAssignment[i])) publishedAssignment[i] = "";
+    if (publishedAssignment[i] && !toSeat.includes(publishedAssignment[i])) publishedAssignment[i] = "";
   }
-
-  // Pins first: a returning pinned student takes back their seat, and whoever sat there
-  // becomes unseated and is placed below.
   enforcePinsOnPublished();
 
-  const unseated = present.filter(n => !publishedAssignment.includes(n));
+  const unseated = toSeat.filter(n => !publishedAssignment.includes(n));
   if (unseated.length === 0) {
     return vacated.length ? "Their seat is now free; the rest of the seating is unchanged." : "";
   }
@@ -2008,7 +2030,8 @@ function buildClassData() {
   const charts = Object.assign({}, prev.charts); // other classrooms' charts as they were
   charts[activeRoomId] = {
     seats: cellMapFromArray(publishedAssignment, layout.cols),
-    pins: cellMapFromArray(fixedStudentBySeat, layout.cols)
+    pins: cellMapFromArray(fixedStudentBySeat, layout.cols),
+    leftOut: Array.from(seatingLeftOut)
   };
   return {
     namesText: namesInput.value,
@@ -2016,6 +2039,7 @@ function buildClassData() {
     restrictions: restrictions.map(r => ({ a: r.a, b: r.b, type: r.type })),
     chartName: chartNameInput.value || "",
     showColors: showColorsInput.checked,
+    leaveAbsentOut: leaveAbsentOutInput.checked,
     groupSettings: Object.assign({}, groupSettings),
     groupRules: groupRules.map(r => ({ a: r.a, b: r.b, type: r.type })),
     groups: groups.map(g => g.slice()),
@@ -2199,6 +2223,7 @@ function applyClassData(data) {
     const chart = (data.charts && data.charts[room.id]) || {};
     publishedAssignment = arrayFromCellMap(chart.seats, room.rows, room.cols);
     fixedStudentBySeat = arrayFromCellMap(chart.pins, room.rows, room.cols);
+    seatingLeftOut = new Set((Array.isArray(chart.leftOut) ? chart.leftOut : []).filter(n => studentNames.includes(n)));
     // Seats removed while another class was showing lose their student and pin
     for (let i = 0; i < layout.exists.length; i++) {
       if (!layout.exists[i]) {
@@ -2209,6 +2234,7 @@ function applyClassData(data) {
 
     chartNameInput.value = typeof data.chartName === "string" ? data.chartName : "";
     showColorsInput.checked = data.showColors !== false;
+    leaveAbsentOutInput.checked = data.leaveAbsentOut === true;
 
     // Restore restrictions
     restrictionsList.innerHTML = "";
@@ -2232,21 +2258,10 @@ function applyClassData(data) {
     const fixedSet = fixedStudentsFromRestrictions();
     cleanupFixedSeatsAgainstFixedStudents(fixedSet);
 
-    // Remove anyone from the published seating who isn't a present student
+    // Students without a seat who belong in the chart (their seat was removed while
+    // another class was showing, or they were added in another classroom) get a free seat
     const present = presentStudents();
-    for (let i = 0; i < publishedAssignment.length; i++) {
-      if (publishedAssignment[i] && !present.includes(publishedAssignment[i])) {
-        publishedAssignment[i] = "";
-      }
-    }
-
-    // Present students without a seat (e.g. their seat was removed while another class
-    // was showing, or they were added in another classroom) get a free seat
-    let note = "";
-    const pins = activePins();
-    if (anyPublishedSeating() && present.some(n => !publishedAssignment.includes(n) && !pins.includes(n))) {
-      note = syncPublishedWithPresent(present);
-    }
+    const note = anyPublishedSeating() ? seatMissingStudents() : "";
 
     // Groups
     stopGroupAnimation();
@@ -2545,7 +2560,9 @@ function switchToTeacherView() {
 function generateSeating() {
   refreshNamesFromTextarea(); // no-op unless the textarea has unapplied changes
   ensureParallelArrays();
-  const seated = presentStudents();
+  // Everyone is seated unless "leave absent students out" is checked
+  const leftOut = new Set(leaveAbsentOutInput.checked ? studentNames.filter(n => absentStudents.has(n)) : []);
+  const seated = studentNames.filter(n => !leftOut.has(n));
 
   // Recompute graphs
   const { pairEdges, gapEdges } = recomputeGraphs();
@@ -2569,7 +2586,7 @@ function generateSeating() {
     return;
   }
   if (seated.length > seatIndices.length) {
-    alert(`Not enough seats. Students present: ${seated.length}, Seats: ${seatIndices.length}.`);
+    alert(`Not enough seats. Students: ${seated.length}, Seats: ${seatIndices.length}.`);
     return;
   }
 
@@ -2591,8 +2608,8 @@ function generateSeating() {
 
     const key = namePairKey(r.a, r.b);
     if (r.type === "MUST_DIRECT") {
-      // Only when both are here; otherwise it would just block a seat next to the other
-      if (!absentStudents.has(r.a) && !absentStudents.has(r.b)) mustDirect.push({ a: r.a, b: r.b });
+      // Only when both are seated; otherwise it would just block a seat next to the other
+      if (!leftOut.has(r.a) && !leftOut.has(r.b)) mustDirect.push({ a: r.a, b: r.b });
     }
     else if (r.type === "GAP") forbiddenGap.add(key);
     else forbiddenPair.add(key);
@@ -2620,7 +2637,7 @@ function generateSeating() {
     const candidate = solveOnce({
       seatIndices,
       studentNames: seated,
-      pins: activePins(),
+      pins: pinsExcept(leftOut),
       fixedSet,
       forbiddenGap,
       mustDirect,
@@ -2657,6 +2674,7 @@ function generateSeating() {
 
   // Publish to students
   publishedAssignment = best.slice();
+  seatingLeftOut = leftOut;
 
   // Enforce pinned students in the published output
   enforcePinsOnPublished();
@@ -2666,8 +2684,9 @@ function generateSeating() {
   saveSetup();
   setStudentTab("seating");
 
-  if (bestLonely === 0) setStatus("Generated (no lonely clusters).");
-  else setStatus(`Generated (lonely clusters: ${bestLonely}).`);
+  let msg = bestLonely === 0 ? "Generated (no lonely clusters)." : `Generated (lonely clusters: ${bestLonely}).`;
+  if (leftOut.size) msg += ` Absent and left out: ${Array.from(leftOut).join(", ")}.`;
+  setStatus(msg);
 }
 
 function solveOnce(ctx) {
@@ -3141,8 +3160,8 @@ function renderGroups(opts = {}) {
 }
 
 function syncGroupsWithPresent(oldPresent) {
-  // Like syncPublishedWithPresent, for groups: students no longer present leave their
-  // group, others stay. Newly present students join, in order of preference: a group
+  // Groups follow attendance (unlike the seating): students no longer present leave
+  // their group, others stay. Newly present students join, in order of preference: a group
   // with someone they must be with, a group vacated in this update (renames keep their
   // group), then the smallest group without anyone they must be apart from.
   // Returns a status message.
@@ -3626,7 +3645,7 @@ btnBuildLayout.addEventListener("click", () => {
 
   const lost = resizeLayout(r, c);
   // Students whose seat fell outside the grid get a free seat, if there is one
-  const reseatMsg = (lost > 0 && anyPublishedSeating()) ? syncPublishedWithPresent(presentStudents()) : "";
+  const reseatMsg = (lost > 0 && anyPublishedSeating()) ? seatMissingStudents() : "";
   updateCounts();
   renderSeatEditor();
   renderStudentView();
@@ -3742,6 +3761,7 @@ function insertPastedNames(pasted) {
 }
 
 btnAllPresent.addEventListener("click", () => setAbsent(Array.from(absentStudents), false));
+leaveAbsentOutInput.addEventListener("change", saveSetup);
 
 btnAddRestriction.addEventListener("click", () => addRestrictionRow(null));
 
