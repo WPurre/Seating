@@ -86,7 +86,7 @@ label {
   font-size: 14px;
 }
 
-input[type="number"], input[type="password"] {
+input[type="number"], input[type="password"], input[type="text"] {
   padding: 8px 10px;
   border-radius: 10px;
   border: 1px solid #d5d9e3;
@@ -165,6 +165,7 @@ button:active {
   height: 100%;
   pointer-events: none;
   z-index: 10;
+  overflow: visible;
 }
 
 /* Ensure seats appear above the background, but under the overlay outline. */
@@ -177,6 +178,150 @@ button:active {
   background: #f0f1f4;
   color: #777;
   border-style: dashed;
+}
+
+/* Teacher editor: click-and-drag painting must not select text */
+#seatEditor {
+  user-select: none;
+}
+
+/* Teacher editor: names wrap onto at most two lines; fitTeacherSeatNames shrinks the
+   text if a word is still too wide, and anything left over is cut off */
+#seatEditor .seat {
+  min-width: 0;
+  overflow: hidden;
+  gap: 2px;
+  padding: 6px 4px;
+}
+
+#seatEditor .seat-name {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  line-height: 1.2;
+}
+
+#seatEditor .seat-pin {
+  flex-shrink: 0;
+}
+
+/* Student view: equal square cells, sized for the longest name but at most 150px wide;
+   longer names wrap. Uses the full window width (e.g. on a projector) and scrolls if
+   the room is still too wide. */
+#studentView {
+  max-width: none;
+}
+
+#studentView .card {
+  overflow-x: auto;
+}
+
+#seatingGrid {
+  width: fit-content;
+  max-width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+#seatingGrid .seat {
+  box-sizing: border-box;
+  min-width: 90px;
+  max-width: 150px;
+  aspect-ratio: 1;
+  /* "anywhere" (not break-word) so a single long word can't push past the cell:
+     the name is a flex item, whose minimum width ignores break-word */
+  overflow-wrap: anywhere;
+  hyphens: auto;
+  font-size: 19px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+#seatingGrid .seat.name-s {
+  font-size: 16px;
+}
+
+#seatingGrid .seat.name-xs {
+  font-size: 14px;
+}
+
+.tool-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 24px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.tool-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.tool-group-label {
+  font-size: 13px;
+  color: #444;
+}
+
+button.tool {
+  padding: 6px 10px;
+  font-size: 13px;
+  background: #fff;
+}
+
+button.tool.active {
+  background: #111;
+  border-color: #111;
+  color: #fff;
+}
+
+/* Colour swatches are round so they don't look like seats */
+button.swatch {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 50%;
+  border-width: 3px;
+  font-size: 13px;
+  line-height: 1;
+  color: #444;
+}
+
+button.swatch-none {
+  background: #fff;
+  border-color: #9aa1ad;
+  border-style: dashed;
+}
+
+button.swatch.active {
+  outline: 3px solid #111;
+  outline-offset: 2px;
+}
+
+.tool-hint {
+  margin: 0 0 10px 0;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: #222;
+  background: #f3f5f9;
+  border-left: 4px solid #9aa1ad;
+  border-radius: 6px;
+}
+
+/* Colour mode: only seats can be clicked, so fade the empty cells */
+#seatEditor.coloring .seat {
+  cursor: pointer;
+}
+
+#seatEditor.coloring .seat.empty {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .seat.label {
@@ -217,6 +362,83 @@ button:active {
 
 .seat-grid.flipped .seat {
   transform: rotate(180deg);
+}
+
+/* Class bar */
+.class-bar {
+  margin-bottom: 14px;
+}
+
+.class-bar .spacer {
+  flex: 1;
+}
+
+select {
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid #d5d9e3;
+  font-size: 14px;
+  background: white;
+  max-width: 260px;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.small {
+  padding: 5px 10px;
+  font-size: 13px;
+}
+
+/* Names: duplicate warnings and paste notes under the textarea */
+.names-messages p {
+  margin: 8px 0 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.names-warning {
+  background: #fff4e5;
+  border-left: 4px solid #c2410c;
+  color: #5c2a06;
+}
+
+.names-note {
+  background: #eef4ff;
+  border-left: 4px solid #1d4ed8;
+  color: #172554;
+}
+
+/* Attendance */
+.attendance {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #e6e8ee;
+}
+
+.attendance-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.attendance-chip {
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  background: #fff;
+  border: 1px solid #cfd5e2;
+}
+
+.attendance-chip.absent {
+  background: #f0f1f4;
+  border-style: dashed;
+  color: #6b7280;
+  text-decoration: line-through;
 }
 
 .chip {
