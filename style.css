@@ -216,13 +216,9 @@ button:active {
   flex-shrink: 0;
 }
 
-/* Student view: equal square cells, sized for the longest name but at most 150px wide;
-   longer names wrap. Uses the full window width (e.g. on a projector) and scrolls if
-   the room is still too wide. */
-#studentView {
-  max-width: none;
-}
-
+/* Student view: equal square cells, as large as fit in the page (same width as the
+   teacher view, as on main) and in the window height. fitStudentGrid sets --cell; the
+   text scales with it. Scrolls sideways if the room is still too wide. */
 #studentView .card {
   overflow-x: auto;
 }
@@ -232,28 +228,31 @@ button:active {
   max-width: 100%;
   margin-left: auto;
   margin-right: auto;
+  grid-auto-rows: var(--cell, 90px);
 }
 
 #seatingGrid .seat {
   box-sizing: border-box;
-  min-width: 90px;
-  max-width: 150px;
-  aspect-ratio: 1;
+  width: var(--cell, 90px);
+  height: var(--cell, 90px);
+  min-height: 0;
+  padding: 4px;
+  overflow: hidden;
   /* "anywhere" (not break-word) so a single long word can't push past the cell:
      the name is a flex item, whose minimum width ignores break-word */
   overflow-wrap: anywhere;
   hyphens: auto;
-  font-size: 19px;
+  font-size: clamp(10px, calc(var(--cell, 90px) * 0.19), 19px);
   font-weight: 600;
   line-height: 1.2;
 }
 
 #seatingGrid .seat.name-s {
-  font-size: 16px;
+  font-size: clamp(9px, calc(var(--cell, 90px) * 0.16), 16px);
 }
 
 #seatingGrid .seat.name-xs {
-  font-size: 14px;
+  font-size: clamp(8px, calc(var(--cell, 90px) * 0.14), 14px);
 }
 
 .tool-bar {
