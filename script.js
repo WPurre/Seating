@@ -75,6 +75,8 @@ const groupSizePreview = document.getElementById("groupSizePreview");
 const groupUseSeatingInput = document.getElementById("groupUseSeatingInput");
 const btnAddGroupRule = document.getElementById("btnAddGroupRule");
 const btnGenerateGroups = document.getElementById("btnGenerateGroups");
+const btnClearGroups = document.getElementById("btnClearGroups");
+const btnClearGroupsStudent = document.getElementById("btnClearGroupsStudent");
 const groupRulesList = document.getElementById("groupRulesList");
 const groupsPreview = document.getElementById("groupsPreview");
 
@@ -3053,6 +3055,14 @@ function generateGroups(animate) {
   }
 }
 
+function clearGroups() {
+  stopGroupAnimation();
+  groups = [];
+  saveSetup();
+  renderGroups();
+  setStatus("Groups cleared.");
+}
+
 function stopGroupAnimation() {
   if (groupAnimation) clearInterval(groupAnimation);
   groupAnimation = null;
@@ -3246,6 +3256,7 @@ function setStudentTab(tab) {
   seatingGrid.classList.toggle("hidden", isGroups);
   groupsView.classList.toggle("hidden", !isGroups);
   btnFlipView.classList.toggle("hidden", isGroups);
+  btnClearGroupsStudent.classList.toggle("hidden", !isGroups);
   updateGenerateButton();
 }
 
@@ -3688,6 +3699,8 @@ groupModeSelect.addEventListener("change", readGroupSettings);
 groupUseSeatingInput.addEventListener("change", readGroupSettings);
 btnAddGroupRule.addEventListener("click", addGroupRule);
 btnGenerateGroups.addEventListener("click", () => generateGroups(true));
+btnClearGroups.addEventListener("click", clearGroups);
+btnClearGroupsStudent.addEventListener("click", clearGroups);
 
 btnToggleMode.addEventListener("click", () => {
   if (isStudentView) switchToTeacherView();
