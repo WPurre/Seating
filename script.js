@@ -1,14 +1,34 @@
 // Seating Generator v4 (mode-free UX)
-// - Click empty cell => add seat
-// - Click seat cell => remove seat
+// - Click/drag over empty cells => add seats; click/drag starting on a seat => remove seats
 // - Drag & drop swaps/moves students (teacher view)
+// - Colour tool: click/drag over tables to give them a group colour
+// - Resizing the grid keeps existing seats (rows/cols are added/removed at the bottom/right)
+// - Updating names keeps the published seating and seats new names in free seats
 // - Restrictions: PAIR, GAP, MUST_DIRECT, FIXED_SEAT ("Specific seat")
 // - FIXED_SEAT students are pre-placed in teacher view only (draft preview)
 // - Generate publishes a seating chart to student view
 // - Changing names or restrictions clears the published seating
 // - Generation prefers fewer "lonely" students if possible
 
+// All classes live under STORE_KEY (see loadStore). STORAGE_KEY is the older
+// single-class format, only read once to migrate it.
+const STORE_KEY = "seating_generator_classes_v1";
 const STORAGE_KEY = "seating_generator_v4";
+const BACKUP_APP_ID = "seating-generator";
+
+// Table group colours: fill for the seat, strong colour for its border.
+// Fills must stay clearly distinct from white on any screen (very pale blue/purple
+// tints read as white), while keeping black names readable.
+const TABLE_COLORS = {
+  red:    { label: "Red",    fill: "#fecaca", stroke: "#b91c1c" },
+  orange: { label: "Orange", fill: "#fed7aa", stroke: "#c2410c" },
+  yellow: { label: "Yellow", fill: "#fde68a", stroke: "#a16207" },
+  green:  { label: "Green",  fill: "#bbf7d0", stroke: "#15803d" },
+  blue:   { label: "Blue",   fill: "#bfdbfe", stroke: "#1d4ed8" },
+  purple: { label: "Purple", fill: "#ddd6fe", stroke: "#6d28d9" },
+  pink:   { label: "Pink",   fill: "#fbcfe8", stroke: "#be185d" },
+  grey:   { label: "Grey",   fill: "#d1d5db", stroke: "#374151" }
+};
 
 // -------------------------
 // DOM
@@ -21,7 +41,18 @@ const btnToggleMode = document.getElementById("btnToggleMode");
 const btnGenerate = document.getElementById("btnGenerate");
 const btnBuildLayout = document.getElementById("btnBuildLayout");
 const btnSave = document.getElementById("btnSave");
-const btnUpdateNames = document.getElementById("btnUpdateNames");
+
+const classSelect = document.getElementById("classSelect");
+const btnNewClass = document.getElementById("btnNewClass");
+const btnDeleteClass = document.getElementById("btnDeleteClass");
+const btnExport = document.getElementById("btnExport");
+const btnExportAll = document.getElementById("btnExportAll");
+const btnImport = document.getElementById("btnImport");
+const importFile = document.getElementById("importFile");
+
+const namesMessages = document.getElementById("namesMessages");
+const attendanceList = document.getElementById("attendanceList");
+const btnAllPresent = document.getElementById("btnAllPresent");
 
 const btnAddRestriction = document.getElementById("btnAddRestriction");
 const btnClearRestrictions = document.getElementById("btnClearRestrictions");
@@ -36,6 +67,11 @@ const colsInput = document.getElementById("colsInput");
 const seatEditor = document.getElementById("seatEditor");
 const seatingGrid = document.getElementById("seatingGrid");
 const pinInput = document.getElementById("pinInput");
+const chartNameInput = document.getElementById("chartNameInput");
+const showColorsInput = document.getElementById("showColorsInput");
+const toolBar = document.getElementById("toolBar");
+const toolHint = document.getElementById("toolHint");
+const chartTitleEl = document.getElementById("chartTitle");
 const statusEl = document.getElementById("status");
 
 const seatCountEl = document.getElementById("seatCount");
@@ -56,8 +92,15 @@ let layout = {
   exists: [] // boolean array rows*cols
 };
 
-let studentNames = [];   // parsed from textarea
+let studentNames = [];   // parsed from textarea (applied on change, see refreshNamesFromTextarea)
 let restrictions = [];   // array of {a,b,type}
+
+// Students marked absent. They keep their restrictions and pins but aren't seated.
+let absentStudents = new Set();
+
+// Every class's saved data: { currentId, teacherPin, classes: [{ id, data }] }, where
+// data is what saveSetup builds. See loadStore/saveSetup.
+let store = null;
 
 
 
@@ -66,6 +109,16 @@ let publishedAssignment = []; // length rows*cols, "" if none
 
 // Fixed seat assignments: seatIndex -> studentName (only for FIXED_SEAT students)
 let fixedStudentBySeat = [];  // length rows*cols, "" if none
+
+// Table group colour per seat: seatIndex -> TABLE_COLORS key, "" if none.
+// Stored per seat; normalizeTableColors() keeps every seat of a table the same colour.
+let tableColorBySeat = [];    // length rows*cols
+
+// Teacher editor tool: "seats" (add/remove seats), a TABLE_COLORS key, or "none" (remove colour)
+let activeTool = "seats";
+
+// Ongoing click-and-drag in the seat editor (see startPaint), null when idle
+let paint = null;
 
 // -------------------------
 // Helpers
@@ -95,6 +148,81 @@ function parseNames(text) {
     }
   }
   return out;
+}
+
+function findDuplicateNames(text) {
+  // Names that appear more than once (case-insensitive) -> [{ name, lines: [1-based] }].
+  // parseNames keeps only the first, so these students would silently be missing.
+  const byKey = new Map();
+  text.split("\n").forEach((line, k) => {
+    const name = normalizeName(line);
+    if (!name) return;
+    const key = name.toLowerCase();
+    if (!byKey.has(key)) byKey.set(key, { name, lines: [] });
+    byKey.get(key).lines.push(k + 1);
+  });
+  return Array.from(byKey.values()).filter(d => d.lines.length > 1);
+}
+
+function presentStudents() {
+  return studentNames.filter(n => !absentStudents.has(n));
+}
+
+const FIRST_NAME_HEADER = /^(first ?name|given ?name|förnamn|fornamn|tilltalsnamn)$/i;
+const LAST_NAME_HEADER = /^(last ?name|surname|family ?name|efternamn)$/i;
+
+function cleanPastedNames(text) {
+  // Tidy a pasted class list. Returns { text, changes: [description] }.
+  // - Spreadsheet/CSV rows (tab, ";" or 2+ "," separated): drop number/email cells and
+  //   join the rest. A "First name"/"Last name" header row picks the name columns
+  //   (kept in the sheet's order) and is itself dropped.
+  // - Numbering and bullets ("1.", "2)", "-", "•") are removed.
+  // Name order is never changed.
+  const changes = new Set();
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  let nameCols = null; // column indices from a header row, in sheet order
+
+  const isColumnRow = (line) => /[\t;]/.test(line) || (line.match(/,/g) || []).length >= 2;
+  const splitCells = (line) => line.split(/[\t;,]/).map(s => s.trim());
+
+  for (const raw of lines) {
+    let line = raw.trim();
+    if (!line) continue;
+
+    if (isColumnRow(line)) {
+      const cells = splitCells(line);
+      const headerCols = cells
+        .map((c, k) => (FIRST_NAME_HEADER.test(c) || LAST_NAME_HEADER.test(c)) ? k : -1)
+        .filter(k => k !== -1);
+      if (headerCols.length > 0) {
+        // Header row: remember the name columns, don't keep the row
+        nameCols = headerCols;
+        changes.add("removed the header row");
+        continue;
+      }
+
+      if (nameCols) {
+        line = nameCols.map(k => cells[k] || "").join(" ");
+      } else {
+        const kept = cells.filter(c => c && !/^[\d\s.\-\/:]+$/.test(c) && !c.includes("@"));
+        if (kept.length !== cells.filter(Boolean).length) changes.add("dropped number/email columns");
+        line = kept.join(" ");
+      }
+      changes.add("joined spreadsheet columns into one name");
+    }
+
+    const unnumbered = line.replace(/^(\d+\s*[.):\-]\s*|\d+\s+|[-•*·]\s+)/, "");
+    if (unnumbered !== line) {
+      changes.add("removed numbering");
+      line = unnumbered;
+    }
+
+    line = line.replace(/\s+/g, " ").trim();
+    if (line) out.push(line);
+  }
+
+  return { text: out.join("\n"), changes: Array.from(changes) };
 }
 
 function shuffleInPlace(arr) {
@@ -442,20 +570,17 @@ function drawClusterOutlinesSvg(containerEl, componentId, getSeatElementByIndex)
   const left0 = refRect.x - refCol * stepX;
   const top0  = refRect.y - refRow * stepY;
 
-  // Slight outward padding so the outline is consistently "centered" vs gaps
-  // and doesn't touch the seat borders too tightly.
-  const pad = 5;
-
+  // Grid line x sits before column x; shift back by half a gap so the outline runs
+  // through the middle of the gap around a table. The outer edges land just outside the
+  // container, so .cluster-overlay has overflow: visible.
   function xEdge(x) {
-    return left0 + x * stepX - pad;
+    return left0 + x * stepX - gapX / 2;
   }
 
   function yEdge(y) {
-    return top0 + y * stepY - pad;
+    return top0 + y * stepY - gapY / 2;
   }
 
-  // And since we subtracted pad on the "top/left" edges, we should add it back
-  // by expanding the viewBox slightly so strokes aren't clipped at borders.
   const width = containerEl.clientWidth;
   const height = containerEl.clientHeight;
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
@@ -711,14 +836,83 @@ function ensureParallelArrays() {
   if (!Array.isArray(fixedStudentBySeat) || fixedStudentBySeat.length !== n) {
     fixedStudentBySeat = new Array(n).fill("");
   }
+  if (!Array.isArray(tableColorBySeat) || tableColorBySeat.length !== n) {
+    tableColorBySeat = new Array(n).fill("");
+  }
 }
 
 function updateCounts() {
+  // Live from the textarea (names apply on change, but the counts and warnings
+  // follow typing), plus the attendance list.
   const seatCount = layout.exists.filter(x => x).length;
-  const studentCount = parseNames(namesInput.value).length;
+  const typedNames = parseNames(namesInput.value);
+  const absentCount = typedNames.filter(n => absentStudents.has(n)).length;
 
   seatCountEl.textContent = String(seatCount);
-  studentCountEl.textContent = String(studentCount);
+  studentCountEl.textContent = absentCount
+    ? `${typedNames.length - absentCount} (+${absentCount} absent)`
+    : String(typedNames.length);
+
+  renderNameMessages();
+  renderAttendance();
+}
+
+function renderNameMessages(pasteNote) {
+  // Duplicate warnings, and (right after a paste) what the paste cleanup changed
+  namesMessages.innerHTML = "";
+
+  if (pasteNote) {
+    const p = document.createElement("p");
+    p.className = "names-note";
+    p.textContent = pasteNote;
+    namesMessages.appendChild(p);
+  }
+
+  for (const dup of findDuplicateNames(namesInput.value)) {
+    const p = document.createElement("p");
+    p.className = "names-warning";
+    const lines = dup.lines.slice(0, -1).join(", ") + " and " + dup.lines[dup.lines.length - 1];
+    p.textContent = `"${dup.name}" is on lines ${lines}, so only one of them is seated. ` +
+      `Add an initial or surname to tell them apart (e.g. "${dup.name} A").`;
+    namesMessages.appendChild(p);
+  }
+}
+
+function renderAttendance() {
+  attendanceList.innerHTML = "";
+  for (const name of studentNames) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    const absent = absentStudents.has(name);
+    btn.className = "attendance-chip" + (absent ? " absent" : "");
+    btn.textContent = name;
+    btn.title = absent ? `${name} is absent: click to mark present` : `Click to mark ${name} absent`;
+    btn.setAttribute("aria-pressed", String(absent));
+    btn.addEventListener("click", () => setAbsent([name], !absent));
+    attendanceList.appendChild(btn);
+  }
+  btnAllPresent.disabled = absentStudents.size === 0;
+}
+
+function setAbsent(names, absent) {
+  // Marking absent frees the student's seat; marking present seats them in a free seat.
+  // The rest of a published seating is kept either way.
+  const previouslyPresent = presentStudents();
+  for (const n of names) {
+    if (absent) absentStudents.add(n);
+    else absentStudents.delete(n);
+  }
+
+  let msg = absent
+    ? `${names.join(", ")} marked absent.`
+    : (names.length === 1 ? `${names[0]} marked present.` : "Everyone marked present.");
+  if (anyPublishedSeating()) msg += " " + syncPublishedWithPresent(previouslyPresent);
+
+  updateCounts();
+  renderSeatEditor();
+  renderStudentView();
+  saveSetup();
+  setStatus(msg);
 }
 
 function anyPublishedSeating() {
@@ -749,6 +943,41 @@ function initLayout(rows, cols) {
   // Clear seats/pins/assignment for new size
   publishedAssignment = new Array(layout.exists.length).fill("");
   fixedStudentBySeat = new Array(layout.exists.length).fill("");
+  tableColorBySeat = new Array(layout.exists.length).fill("");
+}
+
+function resizeLayout(rows, cols) {
+  // Like initLayout, but keeps seats, students, pins and colours that still fit.
+  // Rows/cols are added or removed at the bottom/right.
+  // Returns the number of seated students that fell outside the new grid.
+  ensureParallelArrays();
+  const old = {
+    rows: layout.rows,
+    cols: layout.cols,
+    exists: layout.exists,
+    published: publishedAssignment,
+    fixed: fixedStudentBySeat,
+    colors: tableColorBySeat
+  };
+
+  initLayout(rows, cols);
+
+  let lost = 0;
+  for (let r = 0; r < old.rows; r++) {
+    for (let c = 0; c < old.cols; c++) {
+      const oi = rcToIndex(r, c, old.cols);
+      if (r >= rows || c >= cols) {
+        if (old.exists[oi] && old.published[oi]) lost++;
+        continue;
+      }
+      const ni = rcToIndex(r, c, cols);
+      layout.exists[ni] = old.exists[oi];
+      publishedAssignment[ni] = old.published[oi];
+      fixedStudentBySeat[ni] = old.fixed[oi];
+      tableColorBySeat[ni] = old.colors[oi];
+    }
+  }
+  return lost;
 }
 
 // -------------------------
@@ -891,6 +1120,50 @@ function computeSeatComponents(pairAdj) {
   return comp;
 }
 
+function normalizeTableColors(componentId) {
+  // Give every seat of a table the table's most common colour, so seats added to a
+  // coloured table pick up its colour. Empty cells never keep a colour.
+  ensureParallelArrays();
+  const votes = new Map(); // cid -> Map(colorKey -> count)
+
+  for (let i = 0; i < layout.exists.length; i++) {
+    if (!layout.exists[i]) {
+      tableColorBySeat[i] = "";
+      continue;
+    }
+    const key = tableColorBySeat[i];
+    if (!key || !TABLE_COLORS[key]) continue;
+    const cid = componentId[i];
+    if (!votes.has(cid)) votes.set(cid, new Map());
+    const v = votes.get(cid);
+    v.set(key, (v.get(key) || 0) + 1);
+  }
+
+  const colorOfComp = new Map();
+  for (const [cid, v] of votes.entries()) {
+    let best = "";
+    let bestCount = 0;
+    for (const [key, count] of v.entries()) {
+      if (count > bestCount) {
+        best = key;
+        bestCount = count;
+      }
+    }
+    colorOfComp.set(cid, best);
+  }
+
+  for (let i = 0; i < layout.exists.length; i++) {
+    if (!layout.exists[i]) continue;
+    tableColorBySeat[i] = colorOfComp.get(componentId[i]) || "";
+  }
+}
+
+function applySeatColor(cell, key) {
+  const color = TABLE_COLORS[key];
+  cell.style.background = color ? color.fill : "";
+  cell.style.borderColor = color ? color.stroke : "";
+}
+
 // -------------------------
 // FIXED_SEAT logic (from restrictions)
 // -------------------------
@@ -951,10 +1224,11 @@ function ensureFixedStudentsVisibleInTeacherDraft(draft) {
     }
   }
 
-  // Overlay fixed students into the teacher draft view
+  // Overlay fixed students into the teacher draft view (not absent ones: their seat is
+  // free while they're away)
   for (let i = 0; i < fixedStudentBySeat.length; i++) {
     const s = fixedStudentBySeat[i];
-    if (!s) continue;
+    if (!s || absentStudents.has(s)) continue;
     if (!layout.exists[i]) continue;
     draft[i] = s;
   }
@@ -964,9 +1238,17 @@ function ensureFixedStudentsVisibleInTeacherDraft(draft) {
 // Rendering
 // -------------------------
 
+function chartTitle() {
+  return chartNameInput.value.trim() || "Seating chart";
+}
+
 function renderStudentView() {
   ensureParallelArrays();
-  seatingGrid.style.gridTemplateColumns = `repeat(${layout.cols}, minmax(60px, 1fr))`;
+  chartTitleEl.textContent = chartTitle();
+
+  // Equal square cells sized for the longest name, capped in CSS (longer names wrap).
+  // The grid is fit-content wide, so 1fr columns all take the largest seat's width.
+  seatingGrid.style.gridTemplateColumns = `repeat(${layout.cols}, minmax(90px, 1fr))`;
   seatingGrid.innerHTML = "";
   seatingGrid.classList.toggle("flipped", !!studentViewFlipped);
 
@@ -974,6 +1256,12 @@ function renderStudentView() {
     const cell = document.createElement("div");
     cell.className = "seat" + (layout.exists[i] ? "" : " empty");
     cell.textContent = layout.exists[i] ? (publishedAssignment[i] || "") : "";
+    // Smaller text for long names/words, so they wrap between words rather than inside one
+    const nameHere = cell.textContent;
+    const longestWord = Math.max(0, ...nameHere.split(/[\s-]+/).map(w => w.length));
+    if (longestWord > 12 || nameHere.length > 30) cell.classList.add("name-xs");
+    else if (longestWord > 8 || nameHere.length > 20) cell.classList.add("name-s");
+    if (layout.exists[i] && showColorsInput.checked) applySeatColor(cell, tableColorBySeat[i]);
     seatingGrid.appendChild(cell);
   }
 }
@@ -985,6 +1273,7 @@ function renderSeatEditor() {
   const { pairEdges } = recomputeGraphs();
   const pairAdj = buildAdjacencyFromEdges(pairEdges);
   const compId = computeSeatComponents(pairAdj);
+  normalizeTableColors(compId);
 
   // Teacher draft: start from published seating, but overlay fixed students (teacher-only visibility)
   const draft = publishedAssignment.slice();
@@ -1010,31 +1299,17 @@ function renderSeatEditor() {
     const cell = document.createElement("div");
     cell.dataset.index = String(i);
 
-    // Gap cell: clicking adds a seat
+    // Gap cell: clicking/dragging adds seats (handled by startPaint)
     if (!layout.exists[i]) {
       cell.className = "seat empty";
       cell.textContent = "";
-
-      cell.addEventListener("click", () => {
-        layout.exists[i] = true;
-
-        // Ensure fixed pins and published seating remain consistent
-        ensureParallelArrays();
-        // If a seat is created, no need to change published assignment
-        // but we should re-render so fixed students can auto-appear
-        updateCounts();
-        renderSeatEditor();
-        renderStudentView();
-        saveSetup();
-        setStatus("Seat added.");
-      });
-
       seatEditor.appendChild(cell);
       continue;
     }
 
     // Seat cell: show draft name or "Seat"
     cell.className = "seat";
+    applySeatColor(cell, tableColorBySeat[i]);
 
     // Mark group membership for teacher view (visualized by SVG overlay)
     const cid = compId[i];
@@ -1044,45 +1319,228 @@ function renderSeatEditor() {
       if (nbs.length === 0) cell.classList.add("isolated");
     }
 
-    const pinned = fixedStudentBySeat[i] || "";
+    const pinned = (fixedStudentBySeat[i] && !absentStudents.has(fixedStudentBySeat[i])) ? fixedStudentBySeat[i] : "";
     const nameHere = draft[i] || "";
 
-    cell.textContent = nameHere ? nameHere : "Seat";
-    if (pinned) cell.textContent += " 📌";
-
-    // Drag if there is a student shown here
-    cell.draggable = !!nameHere;
-    if (nameHere) {
-      cell.addEventListener("dragstart", (e) => onDragStartSeat(e, i));
-      cell.addEventListener("dragover", (e) => e.preventDefault());
-      cell.addEventListener("drop", (e) => onDropSeat(e, i));
-    } else {
-      // allow drop into empty seat too
-      cell.addEventListener("dragover", (e) => e.preventDefault());
-      cell.addEventListener("drop", (e) => onDropSeat(e, i));
+    // Long names are cut off with an ellipsis (CSS); hover shows the full name.
+    const label = document.createElement("span");
+    label.className = "seat-name";
+    label.textContent = nameHere ? nameHere : "Seat";
+    cell.appendChild(label);
+    if (nameHere) cell.title = nameHere;
+    if (pinned) {
+      const pin = document.createElement("span");
+      pin.className = "seat-pin";
+      pin.textContent = "📌";
+      cell.appendChild(pin);
     }
 
-    // Click seat => remove seat
-    cell.addEventListener("click", () => {
-      // Removing a seat clears any published assignment and any pin at that seat.
-      layout.exists[i] = false;
-      ensureParallelArrays();
+    // Drag if there is a student shown here (not while colouring, so tables can be
+    // coloured by dragging across them)
+    cell.draggable = !!nameHere && activeTool === "seats";
+    if (cell.draggable) {
+      cell.addEventListener("dragstart", (e) => onDragStartSeat(e, i));
+    }
+    // allow drop into any seat
+    cell.addEventListener("dragover", (e) => e.preventDefault());
+    cell.addEventListener("drop", (e) => onDropSeat(e, i));
 
-      if (publishedAssignment[i]) publishedAssignment[i] = "";
-      if (fixedStudentBySeat[i]) fixedStudentBySeat[i] = "";
-
-      updateCounts();
-      renderSeatEditor();
-      renderStudentView();
-      saveSetup();
-      setStatus("Seat removed.");
-    });
+    // Click a seat with a student => remove seat. (Seats without a student are
+    // removed via click/drag in startPaint; seats with one start a student drag.)
+    if (cell.draggable) {
+      cell.addEventListener("click", () => {
+        // Removing a seat clears any published assignment and any pin at that seat.
+        removeSeat(i);
+        updateCounts();
+        renderSeatEditor();
+        renderStudentView();
+        saveSetup();
+        setStatus("Seat removed.");
+      });
+    }
 
     seatEditor.appendChild(cell);
   }
 
+  fitTeacherSeatNames();
+
   // Draw SVG cluster outlines last (so it can bridge grid gaps)
   drawTeacherClusterOutlines(seatEditor, pairAdj, compId);
+}
+
+// -------------------------
+// Click-and-drag painting (teacher seat editor)
+// -------------------------
+// Seats tool: starting on an empty cell adds seats under the pointer, starting on a seat
+// removes them. Colour tools: every table the pointer touches gets the colour.
+// The DOM is patched while dragging; the full re-render happens in finishPaint.
+
+function removeSeat(i) {
+  ensureParallelArrays();
+  layout.exists[i] = false;
+  publishedAssignment[i] = "";
+  fixedStudentBySeat[i] = "";
+  tableColorBySeat[i] = "";
+}
+
+function seatCellFromEvent(e) {
+  const cell = e.target.closest ? e.target.closest("[data-index]") : null;
+  return cell && seatEditor.contains(cell) ? cell : null;
+}
+
+function paintCell(cell) {
+  const i = Number(cell.dataset.index);
+  if (!Number.isInteger(i)) return;
+
+  if (paint.kind === "seats") {
+    if (layout.exists[i] === paint.add) return;
+    if (paint.add) {
+      layout.exists[i] = true;
+      cell.className = "seat";
+      cell.textContent = "Seat";
+    } else {
+      removeSeat(i);
+      cell.className = "seat empty";
+      cell.textContent = "";
+      cell.draggable = false;
+      applySeatColor(cell, "");
+    }
+    paint.changed = true;
+    return;
+  }
+
+  // Colour tools
+  if (!layout.exists[i]) return;
+  const cid = paint.componentId[i];
+  if (paint.coloured.has(cid)) return;
+  paint.coloured.add(cid);
+
+  const key = paint.kind === "none" ? "" : paint.kind;
+  for (let j = 0; j < layout.exists.length; j++) {
+    if (paint.componentId[j] !== cid) continue;
+    tableColorBySeat[j] = key;
+    const el = seatEditor.querySelector(`[data-index="${j}"]`);
+    if (el) applySeatColor(el, key);
+  }
+  paint.changed = true;
+}
+
+function startPaint(e) {
+  if (e.button !== 0) return;
+  const cell = seatCellFromEvent(e);
+  if (!cell) return;
+  if (cell.draggable) return; // seat with a student: let drag & drop move them
+
+  e.preventDefault();
+  ensureParallelArrays();
+
+  if (activeTool === "seats") {
+    paint = { kind: "seats", add: !layout.exists[Number(cell.dataset.index)], changed: false };
+  } else {
+    const pairAdj = buildAdjacencyFromEdges(recomputeGraphs().pairEdges);
+    paint = { kind: activeTool, componentId: computeSeatComponents(pairAdj), coloured: new Set(), changed: false };
+  }
+  paintCell(cell);
+}
+
+function continuePaint(e) {
+  if (!paint) return;
+  const cell = seatCellFromEvent(e);
+  if (cell) paintCell(cell);
+}
+
+function finishPaint() {
+  if (!paint) return;
+  const done = paint;
+  paint = null;
+  if (!done.changed) return;
+
+  updateCounts();
+  renderSeatEditor();
+  renderStudentView();
+  saveSetup();
+
+  if (done.kind === "seats") setStatus(done.add ? "Seats added." : "Seats removed.");
+  else if (done.kind === "none") setStatus("Table colour removed.");
+  else setStatus(`Tables coloured ${TABLE_COLORS[done.kind].label.toLowerCase()}.`);
+}
+
+function renderToolBar() {
+  // Two groups: "Edit seats", and round colour swatches (deliberately not seat-shaped,
+  // so they aren't mistaken for seats). The hint below says what a click/drag does now.
+  toolBar.innerHTML = "";
+
+  function addGroup(labelText) {
+    const group = document.createElement("div");
+    group.className = "tool-group";
+    const label = document.createElement("span");
+    label.className = "tool-group-label";
+    label.textContent = labelText;
+    group.appendChild(label);
+    toolBar.appendChild(group);
+    return group;
+  }
+
+  function addToolButton(group, tool, className, text, title) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = className + (activeTool === tool ? " active" : "");
+    btn.textContent = text;
+    btn.title = title;
+    btn.setAttribute("aria-pressed", String(activeTool === tool));
+    btn.addEventListener("click", () => {
+      activeTool = tool;
+      renderToolBar();
+      renderSeatEditor();
+    });
+    group.appendChild(btn);
+    return btn;
+  }
+
+  const editGroup = addGroup("Edit:");
+  addToolButton(editGroup, "seats", "tool", "Add / remove seats", "Add or remove seats");
+
+  const colourGroup = addGroup("Colour tables:");
+  for (const [key, color] of Object.entries(TABLE_COLORS)) {
+    const btn = addToolButton(colourGroup, key, "swatch", "", `Colour tables ${color.label.toLowerCase()}`);
+    btn.style.background = color.fill;
+    btn.style.borderColor = color.stroke;
+    btn.setAttribute("aria-label", btn.title);
+  }
+  addToolButton(colourGroup, "none", "swatch swatch-none", "✕", "Remove table colour");
+
+  // Hint for the active tool
+  toolHint.innerHTML = "";
+  const strong = document.createElement("b");
+  let text;
+  const color = TABLE_COLORS[activeTool];
+  if (activeTool === "seats") {
+    strong.textContent = "Editing seats: ";
+    text = "click or drag across empty cells to add seats; start on a seat to remove seats instead. " +
+      "Drag a student to move them.";
+  } else {
+    strong.textContent = color ? `Colouring tables ${color.label.toLowerCase()}: ` : "Removing table colours: ";
+    text = "click a table to " + (color ? "colour" : "clear") + " the whole table, or drag across several tables. " +
+      "Colouring doesn't add seats — choose \"Add / remove seats\" for that.";
+  }
+  toolHint.appendChild(strong);
+  toolHint.appendChild(document.createTextNode(text));
+  toolHint.style.borderLeftColor = color ? color.stroke : "";
+
+  seatEditor.classList.toggle("coloring", activeTool !== "seats");
+}
+
+function fitTeacherSeatNames() {
+  // Shrink a name (down to 10px) while a word is wider than its seat or it needs more
+  // than the two lines CSS allows. Needs the teacher view visible to measure; when
+  // hidden nothing overflows (all sizes are 0) and switchToTeacherView re-renders.
+  for (const el of seatEditor.querySelectorAll(".seat-name")) {
+    let size = parseFloat(getComputedStyle(el).fontSize) || 14;
+    while (size > 10 && (el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1)) {
+      size--;
+      el.style.fontSize = `${size}px`;
+    }
+  }
 }
 
 function trySwapOrMoveInTeacherDraft(fromIdx, toIdx) {
@@ -1105,8 +1563,9 @@ function trySwapOrMoveInTeacherDraft(fromIdx, toIdx) {
   const fromIsFixedStudent = fixedSet.has(fromName);
   const toIsFixedStudent = toName ? fixedSet.has(toName) : false;
 
-  // If target seat is pinned to some other fixed student, block
-  const pinnedTo = fixedStudentBySeat[toIdx];
+  // If target seat is pinned to some other (present) fixed student, block
+  const pins = activePins();
+  const pinnedTo = pins[toIdx];
   if (pinnedTo && pinnedTo !== fromName) {
     alert("That seat is fixed for a different student.");
     return;
@@ -1132,7 +1591,7 @@ function trySwapOrMoveInTeacherDraft(fromIdx, toIdx) {
     }
   } else {
     // Non-fixed student: cannot move into a seat pinned to someone else
-    const pinned = fixedStudentBySeat[toIdx];
+    const pinned = pins[toIdx];
     if (pinned && pinned !== fromName) {
       alert("That seat is fixed for a different student.");
       return;
@@ -1184,11 +1643,13 @@ function enforcePinsOnPublished() {
   cleanupFixedSeatsAgainstFixedStudents(fixedSet);
 
   // Remove fixed students from everywhere first, then place them at their fixed seat.
+  // Absent fixed students stay off the chart. Placing a pin can overwrite whoever sat
+  // there; syncPublishedWithPresent reseats them.
   for (const s of fixedSet) removeStudentFromPublished(s);
 
   for (let i = 0; i < fixedStudentBySeat.length; i++) {
     const s = fixedStudentBySeat[i];
-    if (!s) continue;
+    if (!s || absentStudents.has(s)) continue;
     if (!layout.exists[i]) continue;
     if (!fixedSet.has(s)) continue;
     publishedAssignment[i] = s;
@@ -1212,10 +1673,18 @@ function makeSelect(options, value) {
 }
 
 function refreshNamesFromTextarea() {
-  studentNames = parseNames(namesInput.value);
-
-  // If names change => clear published seating
-  clearPublishedSeating("Names changed — cleared seating chart.");
+  // Applies the textarea (called on its change event, i.e. when it loses focus).
+  const oldNames = studentNames;
+  const oldPresent = presentStudents();
+  const newNames = parseNames(namesInput.value);
+  if (newNames.length === oldNames.length && newNames.every((n, k) => n === oldNames[k])) {
+    updateCounts();
+    return;
+  }
+  studentNames = newNames;
+  for (const n of Array.from(absentStudents)) {
+    if (!studentNames.includes(n)) absentStudents.delete(n);
+  }
 
   // Remove restrictions referencing missing students (except FIXED_SEAT uses only A)
   const old = restrictions.map(r => ({ a: r.a, b: r.b, type: r.type }));
@@ -1239,10 +1708,119 @@ function refreshNamesFromTextarea() {
   const fixedSet = fixedStudentsFromRestrictions();
   cleanupFixedSeatsAgainstFixedStudents(fixedSet);
 
+  let msg = "Names updated.";
+  if (anyPublishedSeating()) msg += " " + syncPublishedWithPresent(oldPresent);
+
   updateCounts();
   renderSeatEditor();
   renderStudentView();
   saveSetup();
+  setStatus(msg);
+}
+
+function activePins() {
+  // fixedStudentBySeat without absent students: their pinned seat is free while they're away
+  ensureParallelArrays();
+  return fixedStudentBySeat.map(s => (s && !absentStudents.has(s)) ? s : "");
+}
+
+function syncPublishedWithPresent(oldPresent) {
+  // Keep the published seating in line with who is present, without reshuffling:
+  // students no longer present (removed or absent) leave their seat, everyone else stays
+  // put. Unseated present students first take a seat vacated in this update (so a
+  // renamed student keeps their seat), then the best free seat that avoids leaving
+  // someone alone at a table. Returns a status message.
+  const present = presentStudents();
+  const pins = activePins();
+
+  const vacated = [];
+  for (const name of oldPresent) {
+    if (present.includes(name)) continue;
+    const idx = publishedAssignment.indexOf(name);
+    if (idx !== -1) {
+      publishedAssignment[idx] = "";
+      vacated.push(idx);
+    }
+  }
+  // Drop anyone else who shouldn't be seated (e.g. stale data)
+  for (let i = 0; i < publishedAssignment.length; i++) {
+    if (publishedAssignment[i] && !present.includes(publishedAssignment[i])) publishedAssignment[i] = "";
+  }
+
+  // Pins first: a returning pinned student takes back their seat, and whoever sat there
+  // becomes unseated and is placed below.
+  enforcePinsOnPublished();
+
+  const unseated = present.filter(n => !publishedAssignment.includes(n));
+  if (unseated.length === 0) {
+    return vacated.length ? "Their seat is now free; the rest of the seating is unchanged." : "";
+  }
+
+  const pairAdj = buildAdjacencyFromEdges(recomputeGraphs().pairEdges);
+  const componentId = computeSeatComponents(pairAdj);
+
+  function isFree(idx) {
+    return layout.exists[idx] && !publishedAssignment[idx] && !pins[idx];
+  }
+
+  const seatsInComp = new Map();
+  const usedInComp = new Map();
+  for (let i = 0; i < layout.exists.length; i++) {
+    if (!layout.exists[i]) continue;
+    const cid = componentId[i];
+    seatsInComp.set(cid, (seatsInComp.get(cid) || 0) + 1);
+    if (publishedAssignment[i] || pins[i]) usedInComp.set(cid, (usedInComp.get(cid) || 0) + 1);
+  }
+
+  function freeSeatScore(idx) {
+    // Best: join someone sitting alone. Then: join an occupied table. Then: a single-seat
+    // table. Worst: open an empty table (the new student would sit alone).
+    const cid = componentId[idx];
+    const used = usedInComp.get(cid) || 0;
+    const total = seatsInComp.get(cid) || 0;
+    let bonus = 0;
+    if (total < 2) bonus = 5000;
+    else if (used === 1) bonus = 20000;
+    else if (used >= 2) bonus = 10000;
+    return bonus + seatPreferenceScore(idx);
+  }
+
+  const placed = [];
+  const notPlaced = [];
+  for (const name of unseated) {
+    let seat = -1;
+    while (vacated.length > 0 && seat === -1) {
+      const idx = vacated.shift();
+      if (isFree(idx)) seat = idx;
+    }
+    if (seat === -1) {
+      let best = -Infinity;
+      for (let i = 0; i < layout.exists.length; i++) {
+        if (!isFree(i)) continue;
+        const score = freeSeatScore(i);
+        if (score > best) {
+          best = score;
+          seat = i;
+        }
+      }
+    }
+
+    if (seat === -1) {
+      notPlaced.push(name);
+      continue;
+    }
+    publishedAssignment[seat] = name;
+    const cid = componentId[seat];
+    usedInComp.set(cid, (usedInComp.get(cid) || 0) + 1);
+    placed.push(name);
+  }
+
+  enforcePinsOnPublished();
+
+  const parts = [];
+  if (placed.length) parts.push(`Seated ${placed.join(", ")} without changing the rest.`);
+  if (notPlaced.length) parts.push(`No free seat for ${notPlaced.join(", ")}: add seats or regenerate.`);
+  return parts.join(" ");
 }
 
 function addRestrictionRow(initial) {
@@ -1351,94 +1929,276 @@ function addRestrictionRow(initial) {
 // Persistence
 // -------------------------
 
-function saveSetup() {
+function buildClassData() {
+  // Everything that belongs to the current class (the teacher PIN is shared, see saveSetup)
   ensureParallelArrays();
-  const data = {
+  return {
     namesText: namesInput.value,
-    rows: Number(rowsInput.value),
-    cols: Number(colsInput.value),
+    absent: Array.from(absentStudents),
+    // The actual grid size, not the inputs: they may hold an unapplied resize, and a
+    // size that doesn't match layoutExists makes applyClassData throw the layout away.
+    rows: layout.rows,
+    cols: layout.cols,
     layoutExists: layout.exists.slice(),
     restrictions: restrictions.map(r => ({ a: r.a, b: r.b, type: r.type })),
-    teacherPin: pinInput.value || "",
+    chartName: chartNameInput.value || "",
+    showColors: showColorsInput.checked,
     publishedAssignment: publishedAssignment.slice(),
-    fixedStudentBySeat: fixedStudentBySeat.slice()
+    fixedStudentBySeat: fixedStudentBySeat.slice(),
+    tableColorBySeat: tableColorBySeat.slice()
   };
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
 }
 
-function loadSetup() {
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if (!raw) return false;
-
+function saveSetup() {
+  if (!store) return; // still starting up
+  currentClass().data = buildClassData();
+  store.teacherPin = pinInput.value || "";
   try {
-    const data = JSON.parse(raw);
-
-    namesInput.value = data.namesText || "";
-    studentNames = parseNames(namesInput.value);
-
-    const r = Number(data.rows || 7);
-    const c = Number(data.cols || 10);
-    rowsInput.value = r;
-    colsInput.value = c;
-
-    initLayout(r, c);
-
-    if (Array.isArray(data.layoutExists) && data.layoutExists.length === layout.exists.length) {
-      layout.exists = data.layoutExists.slice();
-    }
-
-    if (Array.isArray(data.fixedStudentBySeat) && data.fixedStudentBySeat.length === layout.exists.length) {
-      fixedStudentBySeat = data.fixedStudentBySeat.slice();
-    } else {
-      fixedStudentBySeat = new Array(layout.exists.length).fill("");
-    }
-
-    if (Array.isArray(data.publishedAssignment) && data.publishedAssignment.length === layout.exists.length) {
-      publishedAssignment = data.publishedAssignment.slice();
-    } else {
-      publishedAssignment = new Array(layout.exists.length).fill("");
-    }
-
-    pinInput.value = data.teacherPin || "";
-
-    // Restore restrictions
-    restrictionsList.innerHTML = "";
-    restrictions = [];
-    if (Array.isArray(data.restrictions)) {
-      for (const r0 of data.restrictions) {
-        if (!r0.a || !studentNames.includes(r0.a)) continue;
-
-        if (r0.type === "FIXED_SEAT") {
-          addRestrictionRow({ a: r0.a, b: "", type: "FIXED_SEAT" });
-          continue;
-        }
-
-        if (!r0.b || !studentNames.includes(r0.b)) continue;
-        addRestrictionRow({ a: r0.a, b: r0.b, type: r0.type || "PAIR" });
-      }
-    }
-
-    // Cleanup pins/assignments vs current names and fixed set
-    ensureParallelArrays();
-    const fixedSet = fixedStudentsFromRestrictions();
-    cleanupFixedSeatsAgainstFixedStudents(fixedSet);
-
-    // Remove any names in published assignment that no longer exist
-    for (let i = 0; i < publishedAssignment.length; i++) {
-      if (publishedAssignment[i] && !studentNames.includes(publishedAssignment[i])) {
-        publishedAssignment[i] = "";
-      }
-    }
-
-    updateCounts();
-    renderSeatEditor();
-    renderStudentView();
-    setStatus("Loaded saved setup.");
-    return true;
+    localStorage.setItem(STORE_KEY, JSON.stringify(store));
   } catch (e) {
     console.error(e);
-    return false;
+    setStatus("Couldn't save in this browser. Export a backup so nothing is lost.");
   }
+}
+
+function newClassId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+function currentClass() {
+  return store.classes.find(c => c.id === store.currentId) || store.classes[0];
+}
+
+function className(data) {
+  return (data && typeof data.chartName === "string" && data.chartName.trim()) || "Untitled class";
+}
+
+function loadStore() {
+  // Sets `store`. Migrates the old single-class save (STORAGE_KEY) on first run.
+  let parsed = null;
+  try {
+    parsed = JSON.parse(localStorage.getItem(STORE_KEY));
+  } catch (e) {
+    console.error(e);
+  }
+
+  if (parsed && Array.isArray(parsed.classes) && parsed.classes.length > 0) {
+    store = parsed;
+    if (!store.classes.some(c => c.id === store.currentId)) store.currentId = store.classes[0].id;
+    return;
+  }
+
+  let old = null;
+  try {
+    old = JSON.parse(localStorage.getItem(STORAGE_KEY));
+  } catch (e) {
+    console.error(e);
+  }
+  const data = (old && typeof old === "object") ? old : {};
+  const teacherPin = typeof data.teacherPin === "string" ? data.teacherPin : "";
+  delete data.teacherPin;
+
+  const id = newClassId();
+  store = { currentId: id, teacherPin, classes: [{ id, data }] };
+}
+
+function applyClassData(data) {
+  // Load one class's data into the UI and state. Tolerates missing or bad fields
+  // (new classes and imported backups), falling back to defaults.
+  data = (data && typeof data === "object") ? data : {};
+
+  namesInput.value = typeof data.namesText === "string" ? data.namesText : "";
+  studentNames = parseNames(namesInput.value);
+  absentStudents = new Set((Array.isArray(data.absent) ? data.absent : []).filter(n => studentNames.includes(n)));
+
+  const r = Math.max(1, Math.min(30, Number(data.rows) || 7));
+  const c = Math.max(1, Math.min(30, Number(data.cols) || 10));
+  rowsInput.value = r;
+  colsInput.value = c;
+
+  initLayout(r, c);
+  const n = layout.exists.length;
+  const fits = (arr) => Array.isArray(arr) && arr.length === n;
+
+  if (fits(data.layoutExists)) layout.exists = data.layoutExists.map(Boolean);
+  fixedStudentBySeat = fits(data.fixedStudentBySeat) ? data.fixedStudentBySeat.map(x => typeof x === "string" ? x : "") : new Array(n).fill("");
+  publishedAssignment = fits(data.publishedAssignment) ? data.publishedAssignment.map(x => typeof x === "string" ? x : "") : new Array(n).fill("");
+  tableColorBySeat = fits(data.tableColorBySeat) ? data.tableColorBySeat.map(x => TABLE_COLORS[x] ? x : "") : new Array(n).fill("");
+
+  chartNameInput.value = typeof data.chartName === "string" ? data.chartName : "";
+  showColorsInput.checked = data.showColors !== false;
+
+  // Restore restrictions
+  restrictionsList.innerHTML = "";
+  restrictions = [];
+  if (Array.isArray(data.restrictions)) {
+    for (const r0 of data.restrictions) {
+      if (!r0 || !r0.a || !studentNames.includes(r0.a)) continue;
+
+      if (r0.type === "FIXED_SEAT") {
+        addRestrictionRow({ a: r0.a, b: "", type: "FIXED_SEAT" });
+        continue;
+      }
+
+      if (!r0.b || !studentNames.includes(r0.b)) continue;
+      addRestrictionRow({ a: r0.a, b: r0.b, type: ["PAIR", "GAP", "MUST_DIRECT"].includes(r0.type) ? r0.type : "PAIR" });
+    }
+  }
+
+  // Cleanup pins/assignments vs current names and fixed set
+  ensureParallelArrays();
+  const fixedSet = fixedStudentsFromRestrictions();
+  cleanupFixedSeatsAgainstFixedStudents(fixedSet);
+
+  // Remove anyone from the published seating who isn't a present student
+  const present = presentStudents();
+  for (let i = 0; i < publishedAssignment.length; i++) {
+    if (publishedAssignment[i] && !present.includes(publishedAssignment[i])) {
+      publishedAssignment[i] = "";
+    }
+  }
+
+  updateCounts();
+  renderNameMessages();
+  renderSeatEditor();
+  renderStudentView();
+}
+
+// -------------------------
+// Classes, backup export/import
+// -------------------------
+
+function renderClassSelect() {
+  classSelect.innerHTML = "";
+  for (const cls of store.classes) {
+    const opt = document.createElement("option");
+    opt.value = cls.id;
+    // The current class's name is live in the input; others use their saved name
+    opt.textContent = cls.id === store.currentId ? className({ chartName: chartNameInput.value }) : className(cls.data);
+    classSelect.appendChild(opt);
+  }
+  classSelect.value = store.currentId;
+  btnDeleteClass.disabled = store.classes.length <= 1;
+}
+
+function switchToClass(id) {
+  saveSetup();
+  store.currentId = id;
+  activeTool = "seats";
+  renderToolBar();
+  applyClassData(currentClass().data);
+  saveSetup();
+  renderClassSelect();
+  setStatus(`Switched to ${chartTitle()}.`);
+}
+
+function createClass() {
+  // A new class starts with the current room (seats and table colours) but no students
+  saveSetup();
+  const id = newClassId();
+  store.classes.push({
+    id,
+    data: {
+      chartName: "New class",
+      rows: layout.rows,
+      cols: layout.cols,
+      layoutExists: layout.exists.slice(),
+      tableColorBySeat: tableColorBySeat.slice(),
+      showColors: showColorsInput.checked
+    }
+  });
+  switchToClass(id);
+  setStatus("New class created with a copy of the room layout. Type its name and add names.");
+  chartNameInput.focus();
+  chartNameInput.select();
+}
+
+function deleteCurrentClass() {
+  if (store.classes.length <= 1) return;
+  const cls = currentClass();
+  if (!confirm(`Delete the class "${chartTitle()}"? This can't be undone (unless you have exported a backup).`)) return;
+
+  const k = store.classes.indexOf(cls);
+  store.classes.splice(k, 1);
+  store.currentId = store.classes[Math.max(0, k - 1)].id;
+  activeTool = "seats";
+  renderToolBar();
+  applyClassData(currentClass().data);
+  saveSetup();
+  renderClassSelect();
+  setStatus(`Class deleted. Now showing ${chartTitle()}.`);
+}
+
+function fileSafeName(name) {
+  // Letters (any language) and digits kept, everything else becomes "_"
+  return name.trim().replace(/[^\p{L}\p{N}]+/gu, "_").replace(/^_+|_+$/g, "");
+}
+
+function exportBackup(allClasses) {
+  // One class (named after it) or all classes. The name is stored in the file and used
+  // in the file name, so backups are easy to tell apart.
+  saveSetup();
+  const classes = allClasses ? store.classes : [currentClass()];
+  const name = allClasses ? "All classes" : className(currentClass().data);
+  const backup = {
+    app: BACKUP_APP_ID,
+    version: 1,
+    name,
+    exportedAt: new Date().toISOString(),
+    // The teacher PIN is deliberately not exported
+    classes: classes.map(c => ({ name: className(c.data), data: c.data }))
+  };
+  const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${fileSafeName(name) || "seating"}_backup_${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  setStatus(allClasses ? `Exported all ${classes.length} classes.` : `Exported ${name}.`);
+}
+
+function importBackup(text) {
+  // Adds the backup's classes next to the existing ones (nothing is overwritten)
+  let backup;
+  try {
+    backup = JSON.parse(text);
+  } catch (e) {
+    alert("That file isn't a seating backup (it isn't valid JSON).");
+    return;
+  }
+  if (!backup || backup.app !== BACKUP_APP_ID || !Array.isArray(backup.classes)) {
+    alert("That file isn't a seating backup from this tool.");
+    return;
+  }
+
+  saveSetup();
+  // A name that's already taken gets "(imported)", then "(imported 2)", "(imported 3)"...
+  // Names added by this import count as taken too, so no two classes end up the same.
+  const takenNames = new Set(store.classes.map(c => className(c.data)));
+  const added = [];
+  for (const c of backup.classes) {
+    if (!c || typeof c.data !== "object" || c.data === null) continue;
+    const data = Object.assign({}, c.data);
+    delete data.teacherPin;
+    const base = className(data);
+    if (takenNames.has(base)) {
+      let n = 1;
+      while (takenNames.has(n === 1 ? `${base} (imported)` : `${base} (imported ${n})`)) n++;
+      data.chartName = n === 1 ? `${base} (imported)` : `${base} (imported ${n})`;
+    }
+    takenNames.add(className(data));
+    const id = newClassId();
+    store.classes.push({ id, data });
+    added.push(id);
+  }
+
+  if (added.length === 0) {
+    alert("The backup didn't contain any classes.");
+    return;
+  }
+  switchToClass(added[0]);
+  const from = typeof backup.name === "string" && backup.name ? ` from "${backup.name}"` : "";
+  setStatus(`Imported ${added.length} class(es)${from}. Pick one in the Class list.`);
 }
 
 // -------------------------
@@ -1468,6 +2228,10 @@ function switchToTeacherView() {
   studentView.classList.add("hidden");
   teacherView.classList.remove("hidden");
   btnToggleMode.textContent = "Switch to Student View";
+
+  // Table outlines are measured from the DOM, so anything rendered while the teacher
+  // view was hidden (e.g. Generate pressed in Student View) has none. Redraw now.
+  renderSeatEditor();
 }
 
 // -------------------------
@@ -1475,9 +2239,9 @@ function switchToTeacherView() {
 // -------------------------
 
 function generateSeating() {
-  studentNames = parseNames(namesInput.value);
-  updateCounts();
+  refreshNamesFromTextarea(); // no-op unless the textarea has unapplied changes
   ensureParallelArrays();
+  const seated = presentStudents();
 
   // Recompute graphs
   const { pairEdges, gapEdges } = recomputeGraphs();
@@ -1496,8 +2260,12 @@ function generateSeating() {
     alert("Add at least one name.");
     return;
   }
-  if (studentNames.length > seatIndices.length) {
-    alert(`Not enough seats. Students: ${studentNames.length}, Seats: ${seatIndices.length}.`);
+  if (seated.length === 0) {
+    alert("Everyone is marked absent.");
+    return;
+  }
+  if (seated.length > seatIndices.length) {
+    alert(`Not enough seats. Students present: ${seated.length}, Seats: ${seatIndices.length}.`);
     return;
   }
 
@@ -1518,7 +2286,10 @@ function generateSeating() {
     if (r.a.toLowerCase() === r.b.toLowerCase()) continue;
 
     const key = namePairKey(r.a, r.b);
-    if (r.type === "MUST_DIRECT") mustDirect.push({ a: r.a, b: r.b });
+    if (r.type === "MUST_DIRECT") {
+      // Only when both are here; otherwise it would just block a seat next to the other
+      if (!absentStudents.has(r.a) && !absentStudents.has(r.b)) mustDirect.push({ a: r.a, b: r.b });
+    }
     else if (r.type === "GAP") forbiddenGap.add(key);
     else forbiddenPair.add(key);
   }
@@ -1544,7 +2315,8 @@ function generateSeating() {
   for (let attempt = 0; attempt < MAX_SOLVES; attempt++) {
     const candidate = solveOnce({
       seatIndices,
-      studentNames,
+      studentNames: seated,
+      pins: activePins(),
       fixedSet,
       forbiddenGap,
       mustDirect,
@@ -1602,9 +2374,10 @@ function solveOnce(ctx) {
   const assignment = new Array(layout.exists.length).fill("");
   const used = new Set();
 
-  // Pre-place pinned students (fixedStudentBySeat), but only those in fixedSet
-  for (let i = 0; i < fixedStudentBySeat.length; i++) {
-    const s = fixedStudentBySeat[i];
+  // Pre-place pinned students (ctx.pins: absent students' pins are already left out),
+  // but only those in fixedSet
+  for (let i = 0; i < ctx.pins.length; i++) {
+    const s = ctx.pins[i];
     if (!s) continue;
     if (!layout.exists[i]) continue;
     if (!ctx.fixedSet.has(s)) continue;
@@ -1672,7 +2445,7 @@ function solveOnce(ctx) {
     if (!layout.exists[seatIdx]) return false;
 
     // Seat pinned to other student?
-    const pinned = fixedStudentBySeat[seatIdx];
+    const pinned = ctx.pins[seatIdx];
     if (pinned && pinned !== name) return false;
 
     // Desk group constraint
@@ -1712,7 +2485,7 @@ function solveOnce(ctx) {
           if (!layout.exists[nb]) continue;
           if (assignment[nb]) continue;
 
-          const pinnedNb = fixedStudentBySeat[nb];
+          const pinnedNb = ctx.pins[nb];
           if (pinnedNb && pinnedNb !== otherName) continue;
 
           ok = true;
@@ -1753,8 +2526,8 @@ function solveOnce(ctx) {
   if (!ok) return null;
 
   // Make sure pinned fixed students are present (redundant but safe)
-  for (let i = 0; i < fixedStudentBySeat.length; i++) {
-    const s = fixedStudentBySeat[i];
+  for (let i = 0; i < ctx.pins.length; i++) {
+    const s = ctx.pins[i];
     if (!s) continue;
     if (!layout.exists[i]) continue;
     if (!ctx.fixedSet.has(s)) continue;
@@ -1820,23 +2593,113 @@ function scoreSolution(assignment, directAdj, componentId) {
 function downloadSeatingAsPng() {
   ensureParallelArrays();
 
-  const rows = layout.rows;
-  const cols = layout.cols;
+  // Crop to the rows/cols that contain seats, so the chart fills the image.
+  let minR = Infinity, maxR = -1, minC = Infinity, maxC = -1;
+  for (let i = 0; i < layout.exists.length; i++) {
+    if (!layout.exists[i]) continue;
+    const { r, c } = indexToRC(i, layout.cols);
+    minR = Math.min(minR, r); maxR = Math.max(maxR, r);
+    minC = Math.min(minC, c); maxC = Math.max(maxC, c);
+  }
+  if (maxR === -1) {
+    minR = 0; maxR = layout.rows - 1;
+    minC = 0; maxC = layout.cols - 1;
+  }
+  const rows = maxR - minR + 1;
+  const cols = maxC - minC + 1;
 
-  const cellW = 220;
-  const cellH = 80;
-  const gap = 14;
-  const pad = 30;
-  const headerH = 70;
+  // Every seat is the same square, sized for the longest name (between minCell and
+  // maxCell; longer names wrap). Rows/cols without any seat are narrow aisles.
+  const minCell = 150;
+  const maxCell = 260;
+  const aisle = 40;
+  const namePad = 20;
+  const cellSizingFont = 28; // square size is measured at this name size
+  const gap = 16;
+  const pad = 36;
+  const font = "system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
+  const nameFont = (size) => `600 ${size}px ${font}`;
+  const showColors = showColorsInput.checked;
 
-  const title = "Seating chart";
-  const dateStr = new Date().toLocaleString();
-
-  const width = pad * 2 + cols * cellW + (cols - 1) * gap;
-  const height = pad * 2 + headerH + rows * cellH + (rows - 1) * gap;
+  const title = chartTitle();
+  const dateStr = new Date().toLocaleDateString();
 
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
+
+  ctx.font = nameFont(cellSizingFont);
+  let cell = minCell;
+  const seatedNames = [];
+  const rowHasSeat = new Array(rows).fill(false);
+  const colHasSeat = new Array(cols).fill(false);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const idx = rcToIndex(minR + r, minC + c, layout.cols);
+      if (!layout.exists[idx]) continue;
+      rowHasSeat[r] = true;
+      colHasSeat[c] = true;
+      const name = publishedAssignment[idx] || "";
+      if (!name) continue;
+      seatedNames.push(name);
+      cell = Math.max(cell, ctx.measureText(name).width + namePad);
+    }
+  }
+  cell = Math.min(maxCell, Math.ceil(cell));
+
+  // One name size for the whole chart: the largest at which every name fits its square
+  // (wrapped at spaces/hyphens). Names that don't fit even at NAME_FONT_NO_SPLIT_MIN
+  // are left out here and shrunk on their own, so they don't make everyone small.
+  const box = cell - namePad;
+  const fitsAt = (name, size) => {
+    ctx.font = nameFont(size);
+    const lines = wrapToLines(ctx, name, box, false);
+    return !!lines && lines.length * size * NAME_LINE_HEIGHT <= box;
+  };
+  const sizedNames = seatedNames.filter(n => fitsAt(n, NAME_FONT_NO_SPLIT_MIN));
+  let nameSize = NAME_FONT_NO_SPLIT_MIN;
+  for (let size = NAME_FONT_MAX; size > NAME_FONT_NO_SPLIT_MIN; size--) {
+    if (sizedNames.every(n => fitsAt(n, size))) {
+      nameSize = size;
+      break;
+    }
+  }
+
+  // Track positions. Match the student view's flip: the grid is rotated 180°, names
+  // stay upright.
+  function trackPositions(hasSeat, start) {
+    const order = hasSeat.map((_, k) => k);
+    if (studentViewFlipped) order.reverse();
+    const pos = new Array(hasSeat.length);
+    let next = start;
+    for (const k of order) {
+      pos[k] = next;
+      next += (hasSeat[k] ? cell : aisle) + gap;
+    }
+    return { pos, size: next - gap - start };
+  }
+
+  const gridW = trackPositions(colHasSeat, 0).size;
+  const gridH = trackPositions(rowHasSeat, 0).size;
+  const width = pad * 2 + Math.max(gridW, 640);
+
+  // Title: as large as possible, wrapping onto a second line before shrinking.
+  const titleMaxW = width - pad * 2;
+  let titleSize = 72;
+  let titleLines = null;
+  for (; titleSize > 24; titleSize--) {
+    ctx.font = `700 ${titleSize}px ${font}`;
+    titleLines = wrapToLines(ctx, title, titleMaxW, false);
+    if (titleLines && titleLines.length <= 2) break;
+  }
+  if (!titleLines || titleLines.length > 2) titleLines = [title];
+  const titleLineH = titleSize * 1.1;
+  const dateSize = 28;
+  const titleBlockH = titleLines.length * titleLineH;
+  const headerH = titleBlockH + dateSize + 44;
+
+  const height = pad * 2 + headerH + gridH;
+  const colX = trackPositions(colHasSeat, (width - gridW) / 2).pos;
+  const rowY = trackPositions(rowHasSeat, pad + headerH).pos;
 
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.floor(width * dpr);
@@ -1848,55 +2711,116 @@ function downloadSeatingAsPng() {
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, width, height);
 
-  ctx.fillStyle = "#111111";
-  ctx.font = "600 24px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-  ctx.fillText(title, pad, pad + 26);
+  ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = "#000000";
+  ctx.font = `700 ${titleSize}px ${font}`;
+  titleLines.forEach((line, k) => {
+    ctx.fillText(line, pad, pad + titleSize * 0.9 + k * titleLineH, titleMaxW);
+  });
 
-  ctx.fillStyle = "#444444";
-  ctx.font = "400 14px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-  ctx.fillText(dateStr, pad, pad + 50);
-
-  const startY = pad + headerH;
+  ctx.fillStyle = "#222222";
+  ctx.font = `500 ${dateSize}px ${font}`;
+  ctx.fillText(dateStr, pad, pad + titleBlockH + dateSize + 6);
 
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
 
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      const idx = r * cols + c;
-      const x = pad + c * (cellW + gap);
-      const y = startY + r * (cellH + gap);
-
+      const idx = rcToIndex(minR + r, minC + c, layout.cols);
       if (!layout.exists[idx]) continue;
+      const x = colX[c];
+      const y = rowY[r];
 
-      ctx.fillStyle = "#ffffff";
-      ctx.strokeStyle = "#d5d9e3";
-      ctx.lineWidth = 2;
+      const color = showColors ? TABLE_COLORS[tableColorBySeat[idx]] : null;
+      ctx.fillStyle = color ? color.fill : "#ffffff";
+      ctx.strokeStyle = color ? color.stroke : "#222222";
+      ctx.lineWidth = 3;
 
-      roundRect(ctx, x, y, cellW, cellH, 14);
+      roundRect(ctx, x, y, cell, cell, 14);
       ctx.fill();
       ctx.stroke();
 
       const name = publishedAssignment[idx] || "";
-      ctx.fillStyle = "#111111";
-
-      const maxTextWidth = cellW - 20;
-      let fontSize = 18;
-      while (fontSize > 12) {
-        ctx.font = `500 ${fontSize}px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif`;
-        if (ctx.measureText(name).width <= maxTextWidth) break;
-        fontSize--;
-      }
-
-      ctx.fillText(name, x + cellW / 2, y + cellH / 2);
+      if (!name) continue;
+      ctx.fillStyle = "#000000";
+      drawFittedName(ctx, name, x + cell / 2, y + cell / 2, box, box, nameFont, nameSize);
     }
   }
 
   const a = document.createElement("a");
   const safeDate = new Date().toISOString().slice(0, 10);
-  a.download = `seating_chart_${safeDate}.png`;
+  a.download = `${fileSafeName(chartNameInput.value) || "seating_chart"}_${safeDate}.png`;
   a.href = canvas.toDataURL("image/png");
   a.click();
+}
+
+const NAME_FONT_MAX = 64;
+const NAME_FONT_MIN = 14;
+const NAME_LINE_HEIGHT = 1.15;
+
+const NAME_FONT_NO_SPLIT_MIN = 20;
+
+function drawFittedName(ctx, name, cx, cy, maxWidth, maxHeight, nameFont, maxSize) {
+  // Largest size (up to maxSize) at which the name, wrapped at spaces and hyphens, fits the box.
+  // If a word is too long even at NAME_FONT_NO_SPLIT_MIN, start again from the largest
+  // size, now also splitting long words across lines.
+  // Last resort: one line at the smallest size, squeezed to the width.
+  for (const splitWords of [false, true]) {
+    const minSize = splitWords ? NAME_FONT_MIN : NAME_FONT_NO_SPLIT_MIN;
+    for (let size = maxSize; size >= minSize; size--) {
+      ctx.font = nameFont(size);
+      const lines = wrapToLines(ctx, name, maxWidth, splitWords);
+      const lineH = size * NAME_LINE_HEIGHT;
+      if (!lines || lines.length * lineH > maxHeight) continue;
+
+      const top = cy - ((lines.length - 1) * lineH) / 2;
+      lines.forEach((line, k) => ctx.fillText(line, cx, top + k * lineH));
+      return;
+    }
+  }
+
+  ctx.font = nameFont(NAME_FONT_MIN);
+  ctx.fillText(name, cx, cy, maxWidth);
+}
+
+function wrapToLines(ctx, text, maxWidth, splitWords) {
+  // Greedy wrap at spaces, and after hyphens (the hyphen stays on the first line).
+  // A piece wider than maxWidth is split across lines with a hyphen if splitWords,
+  // otherwise null is returned.
+  const pieces = [];
+  for (const word of text.trim().split(/\s+/)) {
+    word.split(/(?<=-)/).forEach((p, k) => pieces.push({ text: p, sep: k === 0 ? " " : "" }));
+  }
+
+  const fits = (s) => ctx.measureText(s).width <= maxWidth;
+  const lines = [];
+  let line = "";
+  for (const p of pieces) {
+    const candidate = line ? line + p.sep + p.text : p.text;
+    if (fits(candidate)) {
+      line = candidate;
+      continue;
+    }
+    if (line) lines.push(line);
+    line = "";
+    if (fits(p.text)) {
+      line = p.text;
+      continue;
+    }
+    if (!splitWords) return null;
+
+    let rest = p.text;
+    while (!fits(rest)) {
+      let n = rest.length - 1;
+      while (n > 1 && !fits(rest.slice(0, n) + "-")) n--;
+      lines.push(rest.slice(0, n) + "-");
+      rest = rest.slice(n);
+    }
+    line = rest;
+  }
+  if (line) lines.push(line);
+  return lines;
 }
 
 function roundRect(ctx, x, y, w, h, r) {
@@ -1920,12 +2844,48 @@ btnBuildLayout.addEventListener("click", () => {
   rowsInput.value = r;
   colsInput.value = c;
 
-  initLayout(r, c);
+  const lost = resizeLayout(r, c);
+  // Students whose seat fell outside the grid get a free seat, if there is one
+  const reseatMsg = (lost > 0 && anyPublishedSeating()) ? syncPublishedWithPresent(presentStudents()) : "";
   updateCounts();
   renderSeatEditor();
   renderStudentView();
   saveSetup();
-  setStatus("Grid rebuilt.");
+  setStatus(lost > 0
+    ? `Grid resized. ${lost} student(s) were outside the new grid. ${reseatMsg}`
+    : "Grid resized — existing seats kept.");
+});
+
+seatEditor.addEventListener("pointerdown", startPaint);
+seatEditor.addEventListener("pointerover", continuePaint);
+window.addEventListener("pointerup", finishPaint);
+window.addEventListener("resize", () => {
+  // Outline positions depend on the seat sizes
+  if (!isStudentView && !paint) renderSeatEditor();
+});
+window.addEventListener("pointercancel", finishPaint);
+
+chartNameInput.addEventListener("input", () => {
+  chartTitleEl.textContent = chartTitle();
+  saveSetup();
+  renderClassSelect();
+});
+
+classSelect.addEventListener("change", () => switchToClass(classSelect.value));
+btnNewClass.addEventListener("click", createClass);
+btnDeleteClass.addEventListener("click", deleteCurrentClass);
+btnExport.addEventListener("click", () => exportBackup(false));
+btnExportAll.addEventListener("click", () => exportBackup(true));
+btnImport.addEventListener("click", () => importFile.click());
+importFile.addEventListener("change", async () => {
+  const file = importFile.files && importFile.files[0];
+  importFile.value = "";
+  if (file) importBackup(await file.text());
+});
+
+showColorsInput.addEventListener("change", () => {
+  renderStudentView();
+  saveSetup();
 });
 
 btnSave.addEventListener("click", () => {
@@ -1946,7 +2906,41 @@ btnToggleMode.addEventListener("click", () => {
   else switchToStudentView();
 });
 
-btnUpdateNames.addEventListener("click", refreshNamesFromTextarea);
+// Names: counts and duplicate warnings follow typing; the list applies when the box
+// loses focus (applying mid-typing would drop restrictions of a half-typed name).
+namesInput.addEventListener("input", () => {
+  updateCounts();
+  saveSetup();
+});
+namesInput.addEventListener("change", refreshNamesFromTextarea);
+namesInput.addEventListener("paste", (e) => {
+  const pasted = e.clipboardData ? e.clipboardData.getData("text/plain") : "";
+  if (pasted && insertPastedNames(pasted)) e.preventDefault();
+});
+
+function insertPastedNames(pasted) {
+  // Inserts a tidied version of a pasted class list at the cursor. Returns false when
+  // there was nothing to tidy, so the browser's normal paste can go ahead.
+  const cleaned = cleanPastedNames(pasted);
+  if (cleaned.text === pasted.replace(/\r\n/g, "\n").trim()) return false;
+
+  // Pasting in the middle of a line would merge names, so keep each on its own line
+  const before = namesInput.value.slice(0, namesInput.selectionStart);
+  const after = namesInput.value.slice(namesInput.selectionEnd);
+  const insert = (before && !before.endsWith("\n") ? "\n" : "") + cleaned.text + (after && !after.startsWith("\n") ? "\n" : "");
+  // execCommand keeps the browser's undo history; setRangeText is the fallback
+  namesInput.focus();
+  if (!document.execCommand || !document.execCommand("insertText", false, insert)) {
+    namesInput.setRangeText(insert, namesInput.selectionStart, namesInput.selectionEnd, "end");
+    namesInput.dispatchEvent(new Event("input"));
+  }
+  if (cleaned.changes.length) {
+    renderNameMessages(`Tidied the pasted list: ${cleaned.changes.join(", ")}. Check it, then click outside the box to apply.`);
+  }
+  return true;
+}
+
+btnAllPresent.addEventListener("click", () => setAbsent(Array.from(absentStudents), false));
 
 btnAddRestriction.addEventListener("click", () => addRestrictionRow(null));
 
@@ -1971,15 +2965,12 @@ btnDownloadPng.addEventListener("click", downloadSeatingAsPng);
 // -------------------------
 
 (function main() {
-  const loaded = loadSetup();
-
-  if (!loaded) {
-    initLayout(Number(rowsInput.value), Number(colsInput.value));
-    studentNames = parseNames(namesInput.value);
-    updateCounts();
-    renderSeatEditor();
-    renderStudentView();
-  }
+  renderToolBar();
+  loadStore();
+  pinInput.value = store.teacherPin || "";
+  applyClassData(currentClass().data);
+  saveSetup();
+  renderClassSelect();
 
   // Default to student view (as you preferred earlier)
   switchToStudentView();

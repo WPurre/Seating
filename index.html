@@ -18,13 +18,41 @@
 
   <!-- TEACHER VIEW -->
   <section id="teacherView" class="panel">
+    <div class="card class-bar">
+      <div class="row">
+        <label>Class <select id="classSelect"></select></label>
+        <label>Name <input id="chartNameInput" type="text" placeholder="e.g. Class 7B"></label>
+        <button id="btnNewClass" class="secondary">New class</button>
+        <button id="btnDeleteClass" class="secondary">Delete class</button>
+        <span class="spacer"></span>
+        <button id="btnExport" class="secondary" title="Save this class to a backup file named after it">Export class</button>
+        <button id="btnExportAll" class="secondary" title="Save every class to one backup file">Export all</button>
+        <button id="btnImport" class="secondary">Import backup</button>
+        <input id="importFile" type="file" accept=".json,application/json" hidden>
+      </div>
+      <p class="hint" style="margin:10px 0 0;">
+        Each class has its own names, attendance, layout, restrictions and seating. The name is also the chart title.
+        A new class starts with a copy of the current room layout.
+        Everything is stored in this browser only, so export a backup to keep it safe or to move it to another computer.
+      </p>
+    </div>
+
     <div class="grid2">
       <div class="card">
         <h2>Names</h2>
-        <p class="hint">One name per line.</p>
+        <p class="hint">
+          One name per line, or paste a list from a spreadsheet (numbering and number/email columns are removed).
+          Changes apply when you click outside the box. The current seating is kept: new names take a free seat, removed names free theirs.
+        </p>
         <textarea id="namesInput" rows="12" placeholder="Alice&#10;Bob&#10;Charlie"></textarea>
-        <div class="row" style="margin-top:10px;">
-          <button id="btnUpdateNames" class="secondary">Update dropdowns</button>
+        <div id="namesMessages" class="names-messages"></div>
+
+        <div class="attendance">
+          <div class="row" style="justify-content: space-between;">
+            <span class="hint" style="margin:0;">Attendance: click a name to mark them absent.</span>
+            <button id="btnAllPresent" class="secondary small">Everyone present</button>
+          </div>
+          <div id="attendanceList" class="attendance-list"></div>
         </div>
       </div>
 
@@ -45,7 +73,7 @@
 
     <div class="grid2">
       <div class="card">
-        <h2>Classroom layout, press an empty space to add a seat. </h2>
+        <h2>Classroom layout</h2>
         <div class="row">
           <label>Rows <input id="rowsInput" type="number" min="1" max="30" value="7"></label>
           <label>Cols <input id="colsInput" type="number" min="1" max="30" value="10"></label>
@@ -53,8 +81,11 @@
         </div>
 
         <p class="hint">
-          Click cells to toggle Seat/Empty. Use Empty cells as gaps/aisles if you want to move a student you can drag and drop.
+          Empty cells work as gaps/aisles. Resizing keeps existing seats (rows/cols change at the bottom/right).
         </p>
+
+        <div id="toolBar" class="tool-bar"></div>
+        <p id="toolHint" class="tool-hint"></p>
 
         <div class="row" style="margin-bottom:8px;">
             <span class="chip">Seats: <b id="seatCount">0</b></span>
@@ -65,9 +96,16 @@
       </div>
 
       <div class="card">
-        <h2>Privacy</h2>
+        <h2>Display &amp; privacy</h2>
+        <div class="row" style="margin-bottom:14px;">
+          <label>
+            <input id="showColorsInput" type="checkbox" checked>
+            Show table colours in Student View and PNG
+          </label>
+        </div>
+
         <p class="hint">
-          Student View hides everything except the seating chart. Optional PIN prevents switching back.
+          Student View hides everything except the seating chart. Optional PIN prevents switching back (one PIN for all classes).
         </p>
 
         <div class="row">
@@ -87,7 +125,7 @@
   <div class="card">
     <div class="row" style="justify-content: space-between; align-items: center;">
       <div>
-        <h2 style="margin-bottom: 6px;">Seating chart</h2>
+        <h2 id="chartTitle" style="margin-bottom: 6px;">Seating chart</h2>
       </div>
 
       <div class="row">
