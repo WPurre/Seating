@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A classroom seating-chart generator. It is a static, dependency-free web app made of three files: `index.html`, `style.css`, and `script.js`. It has no build step, package manager, linter, or test suite. To run it, open `index.html` in a browser, or serve the directory with something like `python3 -m http.server`. All state lives in `localStorage`.
 
+Testers use older browsers too, such as Safari on iPads. Don't use syntax that very recent browsers need. A regex lookbehind `(?<=…)`, for example, can't be parsed by Safari before 16.4, and one parse error disables the whole app. `index.html` shows any script error in `#errorBanner`.
+
 ## Architecture (`script.js`)
 
 Everything is plain global functions and module-level mutable state. Sections are marked with `// ----` banner comments.

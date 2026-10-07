@@ -3553,7 +3553,13 @@ function wrapToLines(ctx, text, maxWidth, splitWords) {
   // otherwise null is returned.
   const pieces = [];
   for (const word of text.trim().split(/\s+/)) {
-    word.split(/(?<=-)/).forEach((p, k) => pieces.push({ text: p, sep: k === 0 ? " " : "" }));
+    // Split after each hyphen, keeping it. (Not a regex lookbehind: Safari before 16.4
+    // can't parse one, which stops the whole script from loading.)
+    const parts = word.split("-");
+    parts.forEach((p, k) => {
+      const piece = k < parts.length - 1 ? `${p}-` : p;
+      if (piece) pieces.push({ text: piece, sep: k === 0 ? " " : "" });
+    });
   }
 
   const fits = (s) => ctx.measureText(s).width <= maxWidth;
