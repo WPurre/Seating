@@ -206,6 +206,12 @@ button:active {
   line-height: 1.2;
 }
 
+/* Absent students (teacher view only): struck through like their attendance chip */
+#seatEditor .seat.is-absent .seat-name {
+  color: #6b7280;
+  text-decoration: line-through;
+}
+
 #seatEditor .seat-pin {
   flex-shrink: 0;
 }
