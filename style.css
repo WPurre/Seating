@@ -365,6 +365,20 @@ button.swatch.active {
   transform: rotate(180deg);
 }
 
+.error-banner {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  z-index: 100;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: #fee2e2;
+  border: 2px solid #b91c1c;
+  color: #450a0a;
+  font-size: 14px;
+}
+
 /* Student View tabs */
 .tabs {
   display: inline-flex;

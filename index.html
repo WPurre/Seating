@@ -182,6 +182,18 @@
   </div>
 </section>
 
+  <!-- Shows script errors on the page (also when script.js can't load in an old
+       browser), so testers see why nothing happens instead of dead buttons -->
+  <div id="errorBanner" class="error-banner hidden"></div>
+  <script>
+    window.addEventListener("error", function (e) {
+      var el = document.getElementById("errorBanner");
+      el.textContent = "Something went wrong: " + e.message +
+        (e.lineno ? " (line " + e.lineno + ")" : "") +
+        ". Please tell whoever set this up, and which browser you use.";
+      el.classList.remove("hidden");
+    });
+  </script>
   <script src="script.js"></script>
 </body>
 </html>
