@@ -12,7 +12,7 @@ Everything is plain global functions and module-level mutable state. Sections ar
 
 ### Core state and the grid model
 - `layout = { rows, cols, exists[] }`: a flat `rows*cols` boolean array. `true` means a seat and `false` means an empty cell, which acts as an aisle or gap. Cells are addressed by flat index; convert with `indexToRC` and `rcToIndex`.
-- `publishedAssignment[]`, `fixedStudentBySeat[]` (student name or `""`) and `tableColorBySeat[]` (a `TABLE_COLORS` key or `""`) are arrays parallel to `layout.exists`. `ensureParallelArrays()` resets them whenever their length doesn't match. A new parallel array must be added there, in `initLayout`/`resizeLayout`, in `removeSeat`, and in save/load.
+- `publishedAssignment[]`, `fixedStudentBySeat[]` (student name or `""`) and `tableColorBySeat[]` (a `TABLE_COLORS` key or `""`) are arrays parallel to `layout.exists`. `ensureParallelArrays()` resets them whenever their length doesn't match. A new parallel array must be added there, in `initLayout`/`resizeLayout`, in `removeSeat`, and in save/load. `layout` and `tableColorBySeat` belong to the current classroom; `publishedAssignment` and `fixedStudentBySeat` are the current class's chart for that classroom (see Persistence).
 - Table colours are stored per seat. `normalizeTableColors` (called from `renderSeatEditor`) gives every seat of a table the table's majority colour, so seats added to a coloured table inherit its colour.
 - Names: `studentNames` is applied from the textarea on its `change` event (`refreshNamesFromTextarea`), not while typing, because applying a half-typed rename would drop that student's restrictions. Counts and duplicate warnings (`findDuplicateNames`) update live. `cleanPastedNames` tidies pasted class lists.
 - `absentStudents` (a Set of names) keeps a student's restrictions and pins but leaves them unseated. Use `presentStudents()` for anyone being seated and `activePins()` for pins: an absent student's pinned seat is free while they're away.
@@ -45,19 +45,32 @@ Names are compared case-insensitively. `parseNames` dedupes them case-insensitiv
 3. A backtracking fill (`canPlace`) enforces the constraints in the table above.
 4. The best candidate wins, compared in this order: fewest lonely clusters, then most adjacent pairs, then highest seat quality. Once found, it is written to `publishedAssignment` and `enforcePinsOnPublished()` is applied.
 
+### Groups (`// Groups` section)
+- Per class: `groupSettings` (`mode` "size" or "count", `value`, `useSeatingRules`), `groupRules` (`{a, b, type: "APART"|"TOGETHER"}`, separate from the seating `restrictions` and re-rendered from state by `renderGroupRules`), and `groups` (the latest result, as arrays of names).
+- `generateGroups` takes present students only and uses `groupSizes` to split them evenly. `groupConstraints` merges TOGETHER rules into clusters with union-find and collects APART pairs, plus the seating PAIR/GAP rules when `useSeatingRules` is set. `makeGroups` places whole clusters by randomized backtracking. If exact sizes are impossible, it retries with every group capped at the largest size.
+- Name and attendance changes call `syncGroupsWithPresent`, which works like `syncPublishedWithPresent`. Group rule changes keep the current groups.
+- Student View has tabs (`setStudentTab`). In Student View the top Generate button acts on the tab that's showing (`updateGenerateButton`). There, groups are generated with a short shuffle animation (`animateGroups`) that only changes the display. Download PNG also follows the tab (`downloadGroupsPng`). Both PNGs share `layoutPngHeader`, `setupPngCanvas`, `drawPngHeader` and `savePng`.
+
 ### Invariants and behaviours to preserve
 - Any restriction change clears the published seating (`clearPublishedSeating`). Name changes, attendance changes and grid resizes do **not**; they call `syncPublishedWithPresent`. With it, everyone else stays put and students no longer present free their seats. Active pins are applied first, so a returning pinned student takes back their seat and whoever borrowed it is reseated. Unseated students then take a seat vacated in the same update (so a rename keeps the seat), then the best free seat according to the lonely-cluster rules.
 - `resizeLayout` keeps everything that still fits. Rows and columns are added or removed at the bottom/right.
 - Dragging in the teacher view edits `publishedAssignment` only when a published seating already exists. Otherwise it only moves pins.
 - Most mutations end with the same sequence: `updateCounts()`, `renderSeatEditor()`, `renderStudentView()`, `saveSetup()`, and `setStatus(...)`.
 
-### Persistence and classes
-- `store = { currentId, teacherPin, classes: [{ id, data }] }` lives in `localStorage` under `STORE_KEY`. Each `data` is one class, as built by `buildClassData`. The teacher PIN is shared by all classes.
-- `saveSetup` writes the current class into `store` and persists it. `applyClassData` loads a class into the UI and state; it's also used for new and imported classes, so it must tolerate missing or bad fields.
-- `loadStore` migrates the old single-class save (`STORAGE_KEY`) on first run.
+### Persistence, classes and classrooms
+- `store = { version: 2, currentId, teacherPin, classes: [{ id, data }], rooms: [room] }` lives in `localStorage` under `STORE_KEY`. The teacher PIN is shared by all classes.
+- A **room** (classroom) is `{ id, name, rows, cols, layoutExists, tableColorBySeat }`. Rooms are shared by all classes. At runtime, `layout` and `tableColorBySeat` are the current room (`activeRoomId`), and `saveRoomFromState` writes them back.
+- A **class** `data` holds names, restrictions, groups and so on (`buildClassData`), plus `roomId` (the room being shown) and `charts: { [roomId]: { seats, pins } }`, one seating chart per room. `seats` and `pins` map `"row,col"` to a name, not flat indices, so resizing a room never scrambles other classes' charts. At runtime they're expanded into `publishedAssignment` and `fixedStudentBySeat`.
+- `saveSetup` writes the current room and class and persists them. It does nothing while `applyClassData` runs (`applyingClass`), because loading restores state step by step.
+- `applyClassData` loads a class in its room. It drops chart cells that are no longer seats, and reseats students who lost their seat that way (room edits from another class). It's also used for new and imported classes, so it must tolerate missing or bad fields.
+- `loadStore` migrates the single-class save (`STORAGE_KEY`) and pre-classroom classes. `convertOldClassData` moves a class's own layout into a room, reusing one with an identical layout.
+- With only one class or classroom, the Delete button clears it instead. Deleting a room deletes every class's chart for it.
 - The class name is `chartName`, which is also the chart title.
-- Export/import writes and reads `{ app: "seating-generator", version, name, classes: [{ name, data }] }`. `exportBackup(false)` exports the current class and `exportBackup(true)` exports all of them. `name` (the class name, or "All classes") is also used in the filename, via `fileSafeName`. Import adds classes and never overwrites. The PIN is never exported.
-- `applyClassData` throws away saved arrays whose lengths don't match `rows*cols`. For that reason `rows` and `cols` are saved from `layout`, never from the inputs, which may hold an unapplied resize.
+- Export/import writes and reads `{ app: "seating-generator", version: 2, name, rooms, classes: [{ name, data }] }`.
+  - `exportBackup(false)` exports the current class with the rooms it uses; `exportBackup(true)` exports everything.
+  - `name` (the class name, or "All classes") is also used in the filename, via `fileSafeName`.
+  - Import adds classes and never overwrites. It reuses a room that has the same name and layout, and still accepts version 1 backups.
+  - The PIN is never exported.
 - The student-view flip state (`studentViewFlipped`) is **not** saved.
 
 ### Rendering notes
