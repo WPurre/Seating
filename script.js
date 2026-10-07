@@ -1284,17 +1284,35 @@ function chartTitle() {
   return chartNameInput.value.trim() || "Seating chart";
 }
 
+function seatBounds() {
+  // The rows/cols that contain seats (the whole grid if there are none):
+  // { minR, minC, rows, cols }
+  let minR = Infinity, maxR = -1, minC = Infinity, maxC = -1;
+  for (let i = 0; i < layout.exists.length; i++) {
+    if (!layout.exists[i]) continue;
+    const { r, c } = indexToRC(i, layout.cols);
+    minR = Math.min(minR, r); maxR = Math.max(maxR, r);
+    minC = Math.min(minC, c); maxC = Math.max(maxC, c);
+  }
+  if (maxR === -1) return { minR: 0, minC: 0, rows: layout.rows, cols: layout.cols };
+  return { minR, minC, rows: maxR - minR + 1, cols: maxC - minC + 1 };
+}
+
 function renderStudentView() {
   ensureParallelArrays();
   chartTitleEl.textContent = chartTitle();
 
-  // Equal square cells sized for the longest name, capped in CSS (longer names wrap).
-  // The grid is fit-content wide, so 1fr columns all take the largest seat's width.
-  seatingGrid.style.gridTemplateColumns = `repeat(${layout.cols}, minmax(90px, 1fr))`;
+  // Only the rows/cols with seats (like the PNG), as equal squares sized to fit the
+  // screen (fitStudentGrid)
+  const { minR, minC, rows, cols } = seatBounds();
+  seatingGrid.dataset.rows = String(rows);
+  seatingGrid.dataset.cols = String(cols);
+  seatingGrid.style.gridTemplateColumns = `repeat(${cols}, var(--cell, 90px))`;
   seatingGrid.innerHTML = "";
   seatingGrid.classList.toggle("flipped", !!studentViewFlipped);
 
-  for (let i = 0; i < layout.exists.length; i++) {
+  for (let k = 0; k < rows * cols; k++) {
+    const i = rcToIndex(minR + Math.floor(k / cols), minC + (k % cols), layout.cols);
     const cell = document.createElement("div");
     cell.className = "seat" + (layout.exists[i] ? "" : " empty");
     cell.textContent = layout.exists[i] ? (publishedAssignment[i] || "") : "";
@@ -1306,6 +1324,28 @@ function renderStudentView() {
     if (layout.exists[i] && showColorsInput.checked) applySeatColor(cell, tableColorBySeat[i]);
     seatingGrid.appendChild(cell);
   }
+  fitStudentGrid();
+}
+
+function fitStudentGrid() {
+  // Seats as large as fit in the window (so a projector shows the whole chart without
+  // scrolling), between 40 and 150px; the text scales with them in CSS (--cell).
+  // Needs the seating chart visible to measure, so it also runs when it's shown and on
+  // window resize.
+  if (!seatingGrid.offsetParent) return;
+  const rows = Number(seatingGrid.dataset.rows) || 1;
+  const cols = Number(seatingGrid.dataset.cols) || 1;
+  const gap = parseFloat(getComputedStyle(seatingGrid).columnGap) || 8;
+
+  const card = seatingGrid.parentElement;
+  const cardStyle = getComputedStyle(card);
+  const availW = card.clientWidth - parseFloat(cardStyle.paddingLeft) - parseFloat(cardStyle.paddingRight);
+  const top = seatingGrid.getBoundingClientRect().top + window.scrollY;
+  const availH = window.innerHeight - top - 40; // room for the card and page padding below
+
+  const fit = Math.min((availW - gap * (cols - 1)) / cols, (availH - gap * (rows - 1)) / rows);
+  const cell = Math.max(40, Math.min(150, Math.floor(fit)));
+  seatingGrid.style.setProperty("--cell", `${cell}px`);
 }
 
 function renderSeatEditor() {
@@ -2529,6 +2569,7 @@ function switchToStudentView() {
   btnToggleMode.textContent = "Switch to Teacher View";
   setStatus("");
   updateGenerateButton();
+  fitStudentGrid();
 }
 
 function switchToTeacherView() {
@@ -3276,6 +3317,7 @@ function setStudentTab(tab) {
   groupsView.classList.toggle("hidden", !isGroups);
   btnFlipView.classList.toggle("hidden", isGroups);
   btnClearGroupsStudent.classList.toggle("hidden", !isGroups);
+  if (!isGroups) fitStudentGrid();
   updateGenerateButton();
 }
 
@@ -3371,19 +3413,7 @@ function downloadSeatingAsPng() {
   ensureParallelArrays();
 
   // Crop to the rows/cols that contain seats, so the chart fills the image.
-  let minR = Infinity, maxR = -1, minC = Infinity, maxC = -1;
-  for (let i = 0; i < layout.exists.length; i++) {
-    if (!layout.exists[i]) continue;
-    const { r, c } = indexToRC(i, layout.cols);
-    minR = Math.min(minR, r); maxR = Math.max(maxR, r);
-    minC = Math.min(minC, c); maxC = Math.max(maxC, c);
-  }
-  if (maxR === -1) {
-    minR = 0; maxR = layout.rows - 1;
-    minC = 0; maxC = layout.cols - 1;
-  }
-  const rows = maxR - minR + 1;
-  const cols = maxC - minC + 1;
+  const { minR, minC, rows, cols } = seatBounds();
 
   // Every seat is the same square, sized for the longest name (between minCell and
   // maxCell; longer names wrap). Rows/cols without any seat are narrow aisles.
@@ -3661,6 +3691,7 @@ window.addEventListener("pointerup", finishPaint);
 window.addEventListener("resize", () => {
   // Outline positions depend on the seat sizes
   if (!isStudentView && !paint) renderSeatEditor();
+  fitStudentGrid();
 });
 window.addEventListener("pointercancel", finishPaint);
 
