@@ -30,9 +30,15 @@
         <button id="btnImport" class="secondary">Import backup</button>
         <input id="importFile" type="file" accept=".json,application/json" hidden>
       </div>
+      <div class="row" style="margin-top:10px;">
+        <label>Classroom <select id="roomSelect"></select></label>
+        <label>Name <input id="roomNameInput" type="text" placeholder="e.g. Room 12"></label>
+        <button id="btnNewRoom" class="secondary">New classroom</button>
+        <button id="btnDeleteRoom" class="secondary">Delete classroom</button>
+      </div>
       <p class="hint" style="margin:10px 0 0;">
-        Each class has its own names, attendance, layout, restrictions and seating. The name is also the chart title.
-        A new class starts with a copy of the current room layout.
+        Each class has its own names, attendance, restrictions, groups and a seating chart for every classroom. The class name is also the chart title.
+        Classrooms (seats and table colours) are shared by all classes.
         Everything is stored in this browser only, so export a backup to keep it safe or to move it to another computer.
       </p>
     </div>
@@ -73,7 +79,7 @@
 
     <div class="grid2">
       <div class="card">
-        <h2>Classroom layout</h2>
+        <h2>Classroom layout: <span id="layoutRoomName"></span></h2>
         <div class="row">
           <label>Rows <input id="rowsInput" type="number" min="1" max="30" value="7"></label>
           <label>Cols <input id="colsInput" type="number" min="1" max="30" value="10"></label>
@@ -118,14 +124,51 @@
         <div id="status" class="status"></div>
       </div>
     </div>
+
+    <div class="card">
+      <h2>Groups</h2>
+      <p class="hint">
+        Split the students who are present into groups, e.g. for a project. The groups can be shown and generated in Student View too.
+      </p>
+
+      <div class="row" style="margin-bottom:10px;">
+        <label>Make
+          <input id="groupValueInput" type="number" min="1" max="99" value="4" style="width:70px;">
+        </label>
+        <select id="groupModeSelect">
+          <option value="size">students per group</option>
+          <option value="count">groups</option>
+        </select>
+        <span id="groupSizePreview" class="hint" style="margin:0;"></span>
+      </div>
+
+      <div class="row" style="margin-bottom:10px;">
+        <label>
+          <input id="groupUseSeatingInput" type="checkbox" checked>
+          Also keep apart students with the seating rules "Not at same table" / "Not at adjacent tables"
+        </label>
+      </div>
+
+      <div class="row" style="margin-bottom:10px;">
+        <button id="btnAddGroupRule" class="secondary">Add group rule</button>
+        <button id="btnGenerateGroups" class="primary">Generate groups</button>
+      </div>
+      <div id="groupRulesList" class="restrictions-list"></div>
+
+      <div id="groupsPreview" class="groups-grid" style="margin-top:14px;"></div>
+    </div>
   </section>
 
   <!-- STUDENT VIEW -->
   <section id="studentView" class="panel hidden">
   <div class="card">
     <div class="row" style="justify-content: space-between; align-items: center;">
-      <div>
-        <h2 id="chartTitle" style="margin-bottom: 6px;">Seating chart</h2>
+      <div class="row">
+        <h2 id="chartTitle" style="margin: 0 10px 0 0;">Seating chart</h2>
+        <div class="tabs" role="tablist">
+          <button id="tabSeating" class="tab active" role="tab" aria-selected="true">Seating chart</button>
+          <button id="tabGroups" class="tab" role="tab" aria-selected="false">Groups</button>
+        </div>
       </div>
 
       <div class="row">
@@ -135,6 +178,7 @@
     </div>
 
     <div id="seatingGrid" class="seat-grid"></div>
+    <div id="groupsView" class="groups-grid groups-big hidden"></div>
   </div>
 </section>
 

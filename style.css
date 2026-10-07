@@ -123,8 +123,9 @@ button:active {
   min-height: 18px;
 }
 
+/* !important: must beat the display rules of the things it hides (e.g. .seat-grid, .groups-grid) */
 .hidden {
-  display: none;
+  display: none !important;
 }
 
 .seat-grid {
@@ -362,6 +363,97 @@ button.swatch.active {
 
 .seat-grid.flipped .seat {
   transform: rotate(180deg);
+}
+
+/* Student View tabs */
+.tabs {
+  display: inline-flex;
+  border: 1px solid #cfd5e2;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.tabs .tab {
+  border: 0;
+  border-radius: 0;
+  background: #fff;
+  padding: 7px 12px;
+}
+
+.tabs .tab + .tab {
+  border-left: 1px solid #cfd5e2;
+}
+
+.tabs .tab.active {
+  background: #111;
+  color: #fff;
+}
+
+#groupRulesList {
+  max-width: 760px;
+}
+
+/* Groups: small cards in the teacher view, big ones in Student View */
+.groups-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 12px;
+}
+
+.groups-grid.groups-big {
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.group-card {
+  border: 2px solid #222;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.group-head {
+  padding: 8px 12px;
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.group-card ul {
+  list-style: none;
+  margin: 0;
+  padding: 8px 12px 10px;
+}
+
+.group-card li {
+  padding: 3px 0;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.groups-big .group-head {
+  font-size: 20px;
+  padding: 10px 14px;
+}
+
+.groups-big .group-card li {
+  font-size: 19px;
+  font-weight: 600;
+  padding: 4px 2px;
+}
+
+/* While shuffling the names are faded; when the groups settle they pop in */
+.groups-grid.shuffling li {
+  opacity: 0.45;
+}
+
+.groups-grid.settle li {
+  animation: group-settle 0.35s ease-out;
+}
+
+@keyframes group-settle {
+  from { opacity: 0.3; transform: scale(0.92); }
+  to { opacity: 1; transform: scale(1); }
 }
 
 /* Class bar */

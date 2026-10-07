@@ -45,6 +45,11 @@ const btnSave = document.getElementById("btnSave");
 const classSelect = document.getElementById("classSelect");
 const btnNewClass = document.getElementById("btnNewClass");
 const btnDeleteClass = document.getElementById("btnDeleteClass");
+const roomSelect = document.getElementById("roomSelect");
+const roomNameInput = document.getElementById("roomNameInput");
+const btnNewRoom = document.getElementById("btnNewRoom");
+const btnDeleteRoom = document.getElementById("btnDeleteRoom");
+const layoutRoomNameEl = document.getElementById("layoutRoomName");
 const btnExport = document.getElementById("btnExport");
 const btnExportAll = document.getElementById("btnExportAll");
 const btnImport = document.getElementById("btnImport");
@@ -60,6 +65,18 @@ const restrictionsList = document.getElementById("restrictionsList");
 
 const btnDownloadPng = document.getElementById("btnDownloadPng");
 const btnFlipView = document.getElementById("btnFlipView");
+const tabSeating = document.getElementById("tabSeating");
+const tabGroups = document.getElementById("tabGroups");
+const groupsView = document.getElementById("groupsView");
+
+const groupValueInput = document.getElementById("groupValueInput");
+const groupModeSelect = document.getElementById("groupModeSelect");
+const groupSizePreview = document.getElementById("groupSizePreview");
+const groupUseSeatingInput = document.getElementById("groupUseSeatingInput");
+const btnAddGroupRule = document.getElementById("btnAddGroupRule");
+const btnGenerateGroups = document.getElementById("btnGenerateGroups");
+const groupRulesList = document.getElementById("groupRulesList");
+const groupsPreview = document.getElementById("groupsPreview");
 
 const namesInput = document.getElementById("namesInput");
 const rowsInput = document.getElementById("rowsInput");
@@ -119,6 +136,18 @@ let activeTool = "seats";
 
 // Ongoing click-and-drag in the seat editor (see startPaint), null when idle
 let paint = null;
+
+// Groups (e.g. for a project), per class. groupRules are separate from the seating
+// restrictions; groups holds the latest generated groups (arrays of names).
+let groupRules = [];      // [{ a, b, type: "APART" | "TOGETHER" }]
+let groupSettings = { mode: "size", value: 4, useSeatingRules: true };
+let groups = [];
+
+// Which Student View tab is showing: "seating" or "groups"
+let studentTab = "seating";
+
+// Interval of the running group shuffle animation, null when idle
+let groupAnimation = null;
 
 // -------------------------
 // Helpers
@@ -855,6 +884,7 @@ function updateCounts() {
 
   renderNameMessages();
   renderAttendance();
+  updateGroupSizePreview();
 }
 
 function renderNameMessages(pasteNote) {
@@ -907,6 +937,9 @@ function setAbsent(names, absent) {
     ? `${names.join(", ")} marked absent.`
     : (names.length === 1 ? `${names[0]} marked present.` : "Everyone marked present.");
   if (anyPublishedSeating()) msg += " " + syncPublishedWithPresent(previouslyPresent);
+  const groupsMsg = syncGroupsWithPresent(previouslyPresent);
+  if (groupsMsg) msg += " " + groupsMsg;
+  renderGroups();
 
   updateCounts();
   renderSeatEditor();
@@ -1708,8 +1741,14 @@ function refreshNamesFromTextarea() {
   const fixedSet = fixedStudentsFromRestrictions();
   cleanupFixedSeatsAgainstFixedStudents(fixedSet);
 
+  groupRules = groupRules.filter(r => studentNames.includes(r.a) && studentNames.includes(r.b));
+  renderGroupRules();
+
   let msg = "Names updated.";
   if (anyPublishedSeating()) msg += " " + syncPublishedWithPresent(oldPresent);
+  const groupsMsg = syncGroupsWithPresent(oldPresent);
+  if (groupsMsg) msg += " " + groupsMsg;
+  renderGroups();
 
   updateCounts();
   renderSeatEditor();
@@ -1928,29 +1967,75 @@ function addRestrictionRow(initial) {
 // -------------------------
 // Persistence
 // -------------------------
+// store = { version: 2, currentId, teacherPin, classes: [{ id, data }], rooms: [room] }
+// room  = { id, name, rows, cols, layoutExists, tableColorBySeat }  (shared by all classes)
+// data  = one class: names, restrictions, groups, ..., roomId (the classroom it's showing)
+//         and charts: { [roomId]: { seats, pins } }, a seating chart per classroom. seats
+//         and pins map "row,col" -> name, so resizing a room doesn't scramble other
+//         classes' charts (cells that no longer exist are dropped when loaded).
+
+// True while applyClassData runs: it restores state step by step, so saving midway
+// (e.g. from addRestrictionRow) would store a half-loaded class.
+let applyingClass = false;
+
+// The classroom being shown (the current class's roomId)
+let activeRoomId = "";
+
+function cellMapFromArray(arr, cols) {
+  const map = {};
+  arr.forEach((name, i) => {
+    if (name) map[`${Math.floor(i / cols)},${i % cols}`] = name;
+  });
+  return map;
+}
+
+function arrayFromCellMap(map, rows, cols) {
+  const arr = new Array(rows * cols).fill("");
+  if (!map || typeof map !== "object") return arr;
+  for (const [key, name] of Object.entries(map)) {
+    const [r, c] = key.split(",").map(Number);
+    if (typeof name === "string" && r >= 0 && r < rows && c >= 0 && c < cols) arr[r * cols + c] = name;
+  }
+  return arr;
+}
 
 function buildClassData() {
-  // Everything that belongs to the current class (the teacher PIN is shared, see saveSetup)
+  // Everything that belongs to the current class (the PIN and classrooms are shared)
   ensureParallelArrays();
+  const prev = currentClass().data || {};
+  const charts = Object.assign({}, prev.charts); // other classrooms' charts as they were
+  charts[activeRoomId] = {
+    seats: cellMapFromArray(publishedAssignment, layout.cols),
+    pins: cellMapFromArray(fixedStudentBySeat, layout.cols)
+  };
   return {
     namesText: namesInput.value,
     absent: Array.from(absentStudents),
-    // The actual grid size, not the inputs: they may hold an unapplied resize, and a
-    // size that doesn't match layoutExists makes applyClassData throw the layout away.
-    rows: layout.rows,
-    cols: layout.cols,
-    layoutExists: layout.exists.slice(),
     restrictions: restrictions.map(r => ({ a: r.a, b: r.b, type: r.type })),
     chartName: chartNameInput.value || "",
     showColors: showColorsInput.checked,
-    publishedAssignment: publishedAssignment.slice(),
-    fixedStudentBySeat: fixedStudentBySeat.slice(),
-    tableColorBySeat: tableColorBySeat.slice()
+    groupSettings: Object.assign({}, groupSettings),
+    groupRules: groupRules.map(r => ({ a: r.a, b: r.b, type: r.type })),
+    groups: groups.map(g => g.slice()),
+    roomId: activeRoomId,
+    charts
   };
 }
 
+function saveRoomFromState() {
+  // The actual grid size, not the inputs: they may hold an unapplied resize
+  const room = currentRoom();
+  if (!room) return;
+  room.name = roomNameInput.value || "";
+  room.rows = layout.rows;
+  room.cols = layout.cols;
+  room.layoutExists = layout.exists.slice();
+  room.tableColorBySeat = tableColorBySeat.slice();
+}
+
 function saveSetup() {
-  if (!store) return; // still starting up
+  if (!store || applyingClass) return; // still starting up / loading a class
+  saveRoomFromState();
   currentClass().data = buildClassData();
   store.teacherPin = pinInput.value || "";
   try {
@@ -1969,12 +2054,92 @@ function currentClass() {
   return store.classes.find(c => c.id === store.currentId) || store.classes[0];
 }
 
+function currentRoom() {
+  return store.rooms.find(r => r.id === activeRoomId) || store.rooms[0];
+}
+
 function className(data) {
   return (data && typeof data.chartName === "string" && data.chartName.trim()) || "Untitled class";
 }
 
+function roomName(room) {
+  return (room && typeof room.name === "string" && room.name.trim()) || "Untitled classroom";
+}
+
+function uniqueName(base, taken, label) {
+  // base, or with a number added: "X (label)", "X (label 2)"... or "X 2", "X 3"...
+  if (!taken.has(base)) return base;
+  for (let n = 1; ; n++) {
+    const name = label ? (n === 1 ? `${base} (${label})` : `${base} (${label} ${n})`) : `${base} ${n + 1}`;
+    if (!taken.has(name)) return name;
+  }
+}
+
+function makeRoom(name, rows = 7, cols = 10) {
+  return {
+    id: newClassId(),
+    name,
+    rows,
+    cols,
+    layoutExists: new Array(rows * cols).fill(false),
+    tableColorBySeat: new Array(rows * cols).fill("")
+  };
+}
+
+function cleanRoom(r) {
+  // A valid room from saved/imported data
+  r = (r && typeof r === "object") ? r : {};
+  const rows = Math.max(1, Math.min(30, Number(r.rows) || 7));
+  const cols = Math.max(1, Math.min(30, Number(r.cols) || 10));
+  const room = makeRoom(typeof r.name === "string" ? r.name : "", rows, cols);
+  if (typeof r.id === "string" && r.id) room.id = r.id;
+  const n = rows * cols;
+  if (Array.isArray(r.layoutExists) && r.layoutExists.length === n) room.layoutExists = r.layoutExists.map(Boolean);
+  if (Array.isArray(r.tableColorBySeat) && r.tableColorBySeat.length === n) {
+    room.tableColorBySeat = r.tableColorBySeat.map(x => TABLE_COLORS[x] ? x : "");
+  }
+  return room;
+}
+
+function sameLayout(a, b) {
+  return a.rows === b.rows && a.cols === b.cols &&
+    JSON.stringify(a.layoutExists) === JSON.stringify(b.layoutExists) &&
+    JSON.stringify(a.tableColorBySeat) === JSON.stringify(b.tableColorBySeat);
+}
+
+function convertOldClassData(data, nameHint) {
+  // Classes saved before classrooms existed carry their own layout and chart arrays.
+  // Move the layout into a classroom (reusing one with an identical layout) and the
+  // chart into data.charts. Data that already has charts is returned unchanged.
+  data = (data && typeof data === "object") ? Object.assign({}, data) : {};
+  if (data.charts && typeof data.charts === "object") return data;
+
+  const layoutRoom = cleanRoom({
+    rows: data.rows, cols: data.cols, layoutExists: data.layoutExists, tableColorBySeat: data.tableColorBySeat
+  });
+  let room = store.rooms.find(r => sameLayout(r, layoutRoom));
+  if (!room) {
+    room = layoutRoom;
+    room.id = newClassId();
+    room.name = uniqueName(`Classroom (${nameHint})`, new Set(store.rooms.map(roomName)), "");
+    store.rooms.push(room);
+  }
+
+  const n = room.rows * room.cols;
+  const arr = (a) => (Array.isArray(a) && a.length === n) ? a.map(x => typeof x === "string" ? x : "") : [];
+  const chart = {
+    seats: cellMapFromArray(arr(data.publishedAssignment), room.cols),
+    pins: cellMapFromArray(arr(data.fixedStudentBySeat), room.cols)
+  };
+  for (const k of ["rows", "cols", "layoutExists", "tableColorBySeat", "publishedAssignment", "fixedStudentBySeat"]) delete data[k];
+  data.roomId = room.id;
+  data.charts = { [room.id]: chart };
+  return data;
+}
+
 function loadStore() {
-  // Sets `store`. Migrates the old single-class save (STORAGE_KEY) on first run.
+  // Sets `store`. Migrates the old single-class save (STORAGE_KEY) and classes from
+  // before classrooms existed.
   let parsed = null;
   try {
     parsed = JSON.parse(localStorage.getItem(STORE_KEY));
@@ -1984,88 +2149,136 @@ function loadStore() {
 
   if (parsed && Array.isArray(parsed.classes) && parsed.classes.length > 0) {
     store = parsed;
-    if (!store.classes.some(c => c.id === store.currentId)) store.currentId = store.classes[0].id;
-    return;
+  } else {
+    let old = null;
+    try {
+      old = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    } catch (e) {
+      console.error(e);
+    }
+    const data = (old && typeof old === "object") ? old : {};
+    const teacherPin = typeof data.teacherPin === "string" ? data.teacherPin : "";
+    delete data.teacherPin;
+    const id = newClassId();
+    store = { currentId: id, teacherPin, classes: [{ id, data }] };
   }
 
-  let old = null;
-  try {
-    old = JSON.parse(localStorage.getItem(STORAGE_KEY));
-  } catch (e) {
-    console.error(e);
+  store.version = 2;
+  store.rooms = (Array.isArray(store.rooms) ? store.rooms : []).map(cleanRoom);
+  for (const cls of store.classes) cls.data = convertOldClassData(cls.data, className(cls.data));
+  if (store.rooms.length === 0) store.rooms.push(makeRoom("Classroom"));
+  for (const cls of store.classes) {
+    if (!store.rooms.some(r => r.id === cls.data.roomId)) cls.data.roomId = store.rooms[0].id;
   }
-  const data = (old && typeof old === "object") ? old : {};
-  const teacherPin = typeof data.teacherPin === "string" ? data.teacherPin : "";
-  delete data.teacherPin;
-
-  const id = newClassId();
-  store = { currentId: id, teacherPin, classes: [{ id, data }] };
+  if (!store.classes.some(c => c.id === store.currentId)) store.currentId = store.classes[0].id;
 }
 
 function applyClassData(data) {
-  // Load one class's data into the UI and state. Tolerates missing or bad fields
-  // (new classes and imported backups), falling back to defaults.
+  // Load one class (in its current classroom) into the UI and state. Tolerates missing
+  // or bad fields (new classes and imported backups), falling back to defaults.
+  // Returns a note for the status line ("" if nothing to report).
   data = (data && typeof data === "object") ? data : {};
+  applyingClass = true;
+  try {
+    activeRoomId = store.rooms.some(r => r.id === data.roomId) ? data.roomId : store.rooms[0].id;
+    const room = currentRoom();
+    roomNameInput.value = room.name || "";
 
-  namesInput.value = typeof data.namesText === "string" ? data.namesText : "";
-  studentNames = parseNames(namesInput.value);
-  absentStudents = new Set((Array.isArray(data.absent) ? data.absent : []).filter(n => studentNames.includes(n)));
+    namesInput.value = typeof data.namesText === "string" ? data.namesText : "";
+    studentNames = parseNames(namesInput.value);
+    absentStudents = new Set((Array.isArray(data.absent) ? data.absent : []).filter(n => studentNames.includes(n)));
 
-  const r = Math.max(1, Math.min(30, Number(data.rows) || 7));
-  const c = Math.max(1, Math.min(30, Number(data.cols) || 10));
-  rowsInput.value = r;
-  colsInput.value = c;
+    rowsInput.value = room.rows;
+    colsInput.value = room.cols;
+    initLayout(room.rows, room.cols);
+    layout.exists = room.layoutExists.slice();
+    tableColorBySeat = room.tableColorBySeat.slice();
 
-  initLayout(r, c);
-  const n = layout.exists.length;
-  const fits = (arr) => Array.isArray(arr) && arr.length === n;
-
-  if (fits(data.layoutExists)) layout.exists = data.layoutExists.map(Boolean);
-  fixedStudentBySeat = fits(data.fixedStudentBySeat) ? data.fixedStudentBySeat.map(x => typeof x === "string" ? x : "") : new Array(n).fill("");
-  publishedAssignment = fits(data.publishedAssignment) ? data.publishedAssignment.map(x => typeof x === "string" ? x : "") : new Array(n).fill("");
-  tableColorBySeat = fits(data.tableColorBySeat) ? data.tableColorBySeat.map(x => TABLE_COLORS[x] ? x : "") : new Array(n).fill("");
-
-  chartNameInput.value = typeof data.chartName === "string" ? data.chartName : "";
-  showColorsInput.checked = data.showColors !== false;
-
-  // Restore restrictions
-  restrictionsList.innerHTML = "";
-  restrictions = [];
-  if (Array.isArray(data.restrictions)) {
-    for (const r0 of data.restrictions) {
-      if (!r0 || !r0.a || !studentNames.includes(r0.a)) continue;
-
-      if (r0.type === "FIXED_SEAT") {
-        addRestrictionRow({ a: r0.a, b: "", type: "FIXED_SEAT" });
-        continue;
+    const chart = (data.charts && data.charts[room.id]) || {};
+    publishedAssignment = arrayFromCellMap(chart.seats, room.rows, room.cols);
+    fixedStudentBySeat = arrayFromCellMap(chart.pins, room.rows, room.cols);
+    // Seats removed while another class was showing lose their student and pin
+    for (let i = 0; i < layout.exists.length; i++) {
+      if (!layout.exists[i]) {
+        publishedAssignment[i] = "";
+        fixedStudentBySeat[i] = "";
       }
-
-      if (!r0.b || !studentNames.includes(r0.b)) continue;
-      addRestrictionRow({ a: r0.a, b: r0.b, type: ["PAIR", "GAP", "MUST_DIRECT"].includes(r0.type) ? r0.type : "PAIR" });
     }
-  }
 
-  // Cleanup pins/assignments vs current names and fixed set
-  ensureParallelArrays();
-  const fixedSet = fixedStudentsFromRestrictions();
-  cleanupFixedSeatsAgainstFixedStudents(fixedSet);
+    chartNameInput.value = typeof data.chartName === "string" ? data.chartName : "";
+    showColorsInput.checked = data.showColors !== false;
 
-  // Remove anyone from the published seating who isn't a present student
-  const present = presentStudents();
-  for (let i = 0; i < publishedAssignment.length; i++) {
-    if (publishedAssignment[i] && !present.includes(publishedAssignment[i])) {
-      publishedAssignment[i] = "";
+    // Restore restrictions
+    restrictionsList.innerHTML = "";
+    restrictions = [];
+    if (Array.isArray(data.restrictions)) {
+      for (const r0 of data.restrictions) {
+        if (!r0 || !r0.a || !studentNames.includes(r0.a)) continue;
+
+        if (r0.type === "FIXED_SEAT") {
+          addRestrictionRow({ a: r0.a, b: "", type: "FIXED_SEAT" });
+          continue;
+        }
+
+        if (!r0.b || !studentNames.includes(r0.b)) continue;
+        addRestrictionRow({ a: r0.a, b: r0.b, type: ["PAIR", "GAP", "MUST_DIRECT"].includes(r0.type) ? r0.type : "PAIR" });
+      }
     }
-  }
 
-  updateCounts();
-  renderNameMessages();
-  renderSeatEditor();
-  renderStudentView();
+    // Cleanup pins/assignments vs current names and fixed set
+    ensureParallelArrays();
+    const fixedSet = fixedStudentsFromRestrictions();
+    cleanupFixedSeatsAgainstFixedStudents(fixedSet);
+
+    // Remove anyone from the published seating who isn't a present student
+    const present = presentStudents();
+    for (let i = 0; i < publishedAssignment.length; i++) {
+      if (publishedAssignment[i] && !present.includes(publishedAssignment[i])) {
+        publishedAssignment[i] = "";
+      }
+    }
+
+    // Present students without a seat (e.g. their seat was removed while another class
+    // was showing, or they were added in another classroom) get a free seat
+    let note = "";
+    const pins = activePins();
+    if (anyPublishedSeating() && present.some(n => !publishedAssignment.includes(n) && !pins.includes(n))) {
+      note = syncPublishedWithPresent(present);
+    }
+
+    // Groups
+    stopGroupAnimation();
+    const gs = (data.groupSettings && typeof data.groupSettings === "object") ? data.groupSettings : {};
+    groupSettings = {
+      mode: gs.mode === "count" ? "count" : "size",
+      value: Math.max(1, Math.min(99, Math.floor(Number(gs.value) || 4))),
+      useSeatingRules: gs.useSeatingRules !== false
+    };
+    groupModeSelect.value = groupSettings.mode;
+    groupValueInput.value = groupSettings.value;
+    groupUseSeatingInput.checked = groupSettings.useSeatingRules;
+    groupRules = (Array.isArray(data.groupRules) ? data.groupRules : [])
+      .filter(r => r && studentNames.includes(r.a) && studentNames.includes(r.b))
+      .map(r => ({ a: r.a, b: r.b, type: r.type === "TOGETHER" ? "TOGETHER" : "APART" }));
+    groups = (Array.isArray(data.groups) ? data.groups : [])
+      .filter(Array.isArray)
+      .map(g => g.filter(n => present.includes(n)))
+      .filter(g => g.length > 0);
+    renderGroupRules();
+    renderGroups();
+
+    updateCounts();
+    renderNameMessages();
+    renderSeatEditor();
+    renderStudentView();
+    return note;
+  } finally {
+    applyingClass = false;
+  }
 }
 
 // -------------------------
-// Classes, backup export/import
+// Classes, classrooms, backup export/import
 // -------------------------
 
 function renderClassSelect() {
@@ -2078,55 +2291,114 @@ function renderClassSelect() {
     classSelect.appendChild(opt);
   }
   classSelect.value = store.currentId;
-  btnDeleteClass.disabled = store.classes.length <= 1;
+  // With only one class, the button clears it instead
+  btnDeleteClass.textContent = store.classes.length > 1 ? "Delete class" : "Clear class";
+
+  roomSelect.innerHTML = "";
+  for (const room of store.rooms) {
+    const opt = document.createElement("option");
+    opt.value = room.id;
+    opt.textContent = room.id === activeRoomId ? roomName({ name: roomNameInput.value }) : roomName(room);
+    roomSelect.appendChild(opt);
+  }
+  roomSelect.value = activeRoomId;
+  btnDeleteRoom.textContent = store.rooms.length > 1 ? "Delete classroom" : "Clear classroom";
+  layoutRoomNameEl.textContent = roomName({ name: roomNameInput.value });
+}
+
+function showCurrentClass(status) {
+  // Load the current class (in its classroom) after store changes, and save
+  activeTool = "seats";
+  renderToolBar();
+  const note = applyClassData(currentClass().data);
+  saveSetup();
+  renderClassSelect();
+  setStatus(note ? `${status} ${note}` : status);
 }
 
 function switchToClass(id) {
   saveSetup();
   store.currentId = id;
-  activeTool = "seats";
-  renderToolBar();
-  applyClassData(currentClass().data);
+  showCurrentClass(`Switched to ${className(currentClass().data)} in ${roomName(currentRoom())}.`);
+}
+
+function switchToRoom(roomId) {
   saveSetup();
-  renderClassSelect();
-  setStatus(`Switched to ${chartTitle()}.`);
+  currentClass().data.roomId = roomId;
+  showCurrentClass(`Showing ${className(currentClass().data)} in ${roomName(store.rooms.find(r => r.id === roomId))}.`);
 }
 
 function createClass() {
-  // A new class starts with the current room (seats and table colours) but no students
+  // A new class starts in the current classroom, with no students
   saveSetup();
   const id = newClassId();
-  store.classes.push({
-    id,
-    data: {
-      chartName: "New class",
-      rows: layout.rows,
-      cols: layout.cols,
-      layoutExists: layout.exists.slice(),
-      tableColorBySeat: tableColorBySeat.slice(),
-      showColors: showColorsInput.checked
-    }
-  });
+  store.classes.push({ id, data: { chartName: "New class", roomId: activeRoomId, showColors: showColorsInput.checked } });
   switchToClass(id);
-  setStatus("New class created with a copy of the room layout. Type its name and add names.");
+  setStatus(`New class created in ${roomName(currentRoom())}. Type its name and add names.`);
   chartNameInput.focus();
   chartNameInput.select();
 }
 
 function deleteCurrentClass() {
-  if (store.classes.length <= 1) return;
+  saveSetup();
   const cls = currentClass();
-  if (!confirm(`Delete the class "${chartTitle()}"? This can't be undone (unless you have exported a backup).`)) return;
+  const name = className(cls.data);
 
+  if (store.classes.length <= 1) {
+    if (!confirm(`Clear the class "${name}"? Its names, restrictions, groups and seating charts are removed. ` +
+      "The classrooms are kept. This can't be undone (unless you have exported a backup).")) return;
+    cls.data = { roomId: activeRoomId, showColors: showColorsInput.checked };
+    showCurrentClass("Class cleared.");
+    return;
+  }
+
+  if (!confirm(`Delete the class "${name}"? This can't be undone (unless you have exported a backup).`)) return;
   const k = store.classes.indexOf(cls);
   store.classes.splice(k, 1);
   store.currentId = store.classes[Math.max(0, k - 1)].id;
-  activeTool = "seats";
-  renderToolBar();
-  applyClassData(currentClass().data);
+  showCurrentClass(`Class deleted. Now showing ${className(currentClass().data)}.`);
+}
+
+function createRoom() {
+  // A new classroom starts as an empty grid
   saveSetup();
-  renderClassSelect();
-  setStatus(`Class deleted. Now showing ${chartTitle()}.`);
+  const room = makeRoom(uniqueName("New classroom", new Set(store.rooms.map(roomName)), ""));
+  store.rooms.push(room);
+  switchToRoom(room.id);
+  setStatus("New classroom created. Name it, then click or drag in the grid to add seats.");
+  roomNameInput.focus();
+  roomNameInput.select();
+}
+
+function deleteCurrentRoom() {
+  saveSetup();
+  const room = currentRoom();
+  const name = roomName(room);
+
+  if (store.rooms.length <= 1) {
+    if (!confirm(`Clear the classroom "${name}"? All its seats and table colours are removed, ` +
+      "and every class's seating chart for it. This can't be undone (unless you have exported a backup).")) return;
+    Object.assign(room, makeRoom(room.name, room.rows, room.cols), { id: room.id });
+    for (const cls of store.classes) {
+      if (cls.data.charts) delete cls.data.charts[room.id];
+    }
+    showCurrentClass("Classroom cleared.");
+    return;
+  }
+
+  if (!confirm(`Delete the classroom "${name}"? Every class's seating chart for it is deleted too. ` +
+    "This can't be undone (unless you have exported a backup).")) return;
+  const k = store.rooms.indexOf(room);
+  store.rooms.splice(k, 1);
+  const fallback = store.rooms[Math.max(0, k - 1)].id;
+  for (const cls of store.classes) {
+    if (cls.data.charts) delete cls.data.charts[room.id];
+    if (cls.data.roomId !== room.id) continue;
+    // Classes that were showing it move to a classroom where they have a chart, if any
+    const withChart = Object.keys(cls.data.charts || {}).find(id => store.rooms.some(x => x.id === id));
+    cls.data.roomId = withChart || fallback;
+  }
+  showCurrentClass(`Classroom deleted. Now showing ${roomName(currentRoom())}.`);
 }
 
 function fileSafeName(name) {
@@ -2135,17 +2407,20 @@ function fileSafeName(name) {
 }
 
 function exportBackup(allClasses) {
-  // One class (named after it) or all classes. The name is stored in the file and used
-  // in the file name, so backups are easy to tell apart.
+  // One class (named after it, with the classrooms it has charts for) or everything.
+  // The name is stored in the file and used in the file name.
   saveSetup();
   const classes = allClasses ? store.classes : [currentClass()];
+  const usedRooms = new Set(classes.flatMap(c => [c.data.roomId, ...Object.keys(c.data.charts || {})]));
+  const rooms = allClasses ? store.rooms : store.rooms.filter(r => usedRooms.has(r.id));
   const name = allClasses ? "All classes" : className(currentClass().data);
   const backup = {
     app: BACKUP_APP_ID,
-    version: 1,
+    version: 2,
     name,
     exportedAt: new Date().toISOString(),
     // The teacher PIN is deliberately not exported
+    rooms,
     classes: classes.map(c => ({ name: className(c.data), data: c.data }))
   };
   const blob = new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" });
@@ -2154,11 +2429,12 @@ function exportBackup(allClasses) {
   a.download = `${fileSafeName(name) || "seating"}_backup_${new Date().toISOString().slice(0, 10)}.json`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  setStatus(allClasses ? `Exported all ${classes.length} classes.` : `Exported ${name}.`);
+  setStatus(allClasses ? `Exported all ${classes.length} classes and ${rooms.length} classrooms.` : `Exported ${name}.`);
 }
 
 function importBackup(text) {
-  // Adds the backup's classes next to the existing ones (nothing is overwritten)
+  // Adds the backup's classes (and classrooms) next to the existing ones; nothing is
+  // overwritten. A classroom with the same name and layout as an existing one is reused.
   let backup;
   try {
     backup = JSON.parse(text);
@@ -2172,21 +2448,45 @@ function importBackup(text) {
   }
 
   saveSetup();
+
+  // Classrooms: backup id -> id here
+  const roomIds = new Map();
+  for (const r of (Array.isArray(backup.rooms) ? backup.rooms : [])) {
+    const room = cleanRoom(r);
+    const existing = store.rooms.find(x => roomName(x) === roomName(room) && sameLayout(x, room));
+    if (existing) {
+      roomIds.set(room.id, existing.id);
+      continue;
+    }
+    const backupId = room.id;
+    room.id = newClassId();
+    room.name = uniqueName(roomName(room), new Set(store.rooms.map(roomName)), "imported");
+    store.rooms.push(room);
+    roomIds.set(backupId, room.id);
+  }
+
   // A name that's already taken gets "(imported)", then "(imported 2)", "(imported 3)"...
   // Names added by this import count as taken too, so no two classes end up the same.
   const takenNames = new Set(store.classes.map(c => className(c.data)));
   const added = [];
   for (const c of backup.classes) {
     if (!c || typeof c.data !== "object" || c.data === null) continue;
-    const data = Object.assign({}, c.data);
+    let data = Object.assign({}, c.data);
     delete data.teacherPin;
-    const base = className(data);
-    if (takenNames.has(base)) {
-      let n = 1;
-      while (takenNames.has(n === 1 ? `${base} (imported)` : `${base} (imported ${n})`)) n++;
-      data.chartName = n === 1 ? `${base} (imported)` : `${base} (imported ${n})`;
+
+    if (data.charts && typeof data.charts === "object") {
+      const charts = {};
+      for (const [id, chart] of Object.entries(data.charts)) {
+        if (roomIds.has(id)) charts[roomIds.get(id)] = chart;
+      }
+      data.charts = charts;
+      data.roomId = roomIds.get(data.roomId) || Object.keys(charts)[0] || store.rooms[0].id;
+    } else {
+      data = convertOldClassData(data, className(data)); // backup from before classrooms
     }
-    takenNames.add(className(data));
+
+    data.chartName = uniqueName(className(data), takenNames, "imported");
+    takenNames.add(data.chartName);
     const id = newClassId();
     store.classes.push({ id, data });
     added.push(id);
@@ -2211,6 +2511,7 @@ function switchToStudentView() {
   studentView.classList.remove("hidden");
   btnToggleMode.textContent = "Switch to Teacher View";
   setStatus("");
+  updateGenerateButton();
 }
 
 function switchToTeacherView() {
@@ -2228,6 +2529,7 @@ function switchToTeacherView() {
   studentView.classList.add("hidden");
   teacherView.classList.remove("hidden");
   btnToggleMode.textContent = "Switch to Student View";
+  updateGenerateButton();
 
   // Table outlines are measured from the DOM, so anything rendered while the teacher
   // view was hidden (e.g. Generate pressed in Student View) has none. Redraw now.
@@ -2360,6 +2662,7 @@ function generateSeating() {
   renderStudentView();
   renderSeatEditor();
   saveSetup();
+  setStudentTab("seating");
 
   if (bestLonely === 0) setStatus("Generated (no lonely clusters).");
   else setStatus(`Generated (lonely clusters: ${bestLonely}).`);
@@ -2587,6 +2890,450 @@ function scoreSolution(assignment, directAdj, componentId) {
 }
 
 // -------------------------
+// Groups
+// -------------------------
+
+const GROUP_RULE_TYPES = [
+  { value: "APART", label: "Not in the same group" },
+  { value: "TOGETHER", label: "Must be in the same group" }
+];
+
+function groupSizes(n) {
+  // Group sizes for n students from the settings, as even as possible:
+  // 26 in groups of 4 -> 4,4,4,4,4,3,3; 26 in 6 groups -> 5,5,4,4,4,4
+  if (n <= 0) return [];
+  const v = Math.max(1, Math.floor(Number(groupSettings.value) || 1));
+  const k = groupSettings.mode === "count" ? Math.min(v, n) : Math.ceil(n / v);
+  const base = Math.floor(n / k);
+  const extra = n % k;
+  return Array.from({ length: k }, (_, i) => base + (i < extra ? 1 : 0));
+}
+
+function describeGroupSizes(sizes) {
+  // e.g. "7 groups (5 of 4, 2 of 3)" or "6 groups of 4"
+  const counts = new Map();
+  for (const size of sizes) counts.set(size, (counts.get(size) || 0) + 1);
+  const label = sizes.length === 1 ? "1 group" : `${sizes.length} groups`;
+  if (counts.size === 1) return `${label} of ${sizes[0]}`;
+  const parts = Array.from(counts.entries()).sort((x, y) => y[0] - x[0]).map(([size, count]) => `${count} of ${size}`);
+  return `${label} (${parts.join(", ")})`;
+}
+
+function updateGroupSizePreview() {
+  const n = presentStudents().length;
+  groupSizePreview.textContent = n ? `→ ${describeGroupSizes(groupSizes(n))} for the ${n} students present` : "";
+}
+
+function groupConstraints(present) {
+  // "Together" rules are merged into clusters (if A-B and B-C, then A, B and C) that
+  // must share a group; "apart" is a set of namePairKeys. Only present students count.
+  const presentSet = new Set(present);
+  const apart = new Set();
+  const together = [];
+  const both = (r) => r.a && r.b && r.a !== r.b && presentSet.has(r.a) && presentSet.has(r.b);
+
+  for (const r of groupRules) {
+    if (!both(r)) continue;
+    if (r.type === "TOGETHER") together.push([r.a, r.b]);
+    else apart.add(namePairKey(r.a, r.b));
+  }
+  if (groupSettings.useSeatingRules) {
+    for (const r of restrictions) {
+      if ((r.type === "PAIR" || r.type === "GAP") && both(r)) apart.add(namePairKey(r.a, r.b));
+    }
+  }
+
+  const parent = new Map(present.map(n => [n, n]));
+  const find = (n) => (parent.get(n) === n ? n : find(parent.get(n)));
+  for (const [a, b] of together) parent.set(find(a), find(b));
+
+  const byRoot = new Map();
+  for (const n of present) {
+    const root = find(n);
+    if (!byRoot.has(root)) byRoot.set(root, []);
+    byRoot.get(root).push(n);
+  }
+  return { clusters: Array.from(byRoot.values()), apart };
+}
+
+function makeGroups(clusters, apart, capacities) {
+  // Randomized backtracking: put each "together" cluster into a group that has room
+  // and nobody the cluster must be apart from. Returns arrays of names, or null.
+  const order = clusters.slice();
+  shuffleInPlace(order);
+  order.sort((x, y) => y.length - x.length); // big clusters first (stable sort keeps the shuffle)
+
+  const result = capacities.map(() => []);
+  const room = capacities.slice();
+  let steps = 0;
+
+  const conflicts = (cluster, group) => cluster.some(a => group.some(b => apart.has(namePairKey(a, b))));
+
+  function place(i) {
+    if (i === order.length) return true;
+    if (++steps > 20000) return false;
+    const cluster = order[i];
+    const groupOrder = result.map((_, g) => g);
+    shuffleInPlace(groupOrder);
+    const triedEmpty = new Set(); // empty groups with the same room are interchangeable
+
+    for (const g of groupOrder) {
+      if (room[g] < cluster.length || conflicts(cluster, result[g])) continue;
+      if (result[g].length === 0) {
+        if (triedEmpty.has(room[g])) continue;
+        triedEmpty.add(room[g]);
+      }
+      result[g].push(...cluster);
+      room[g] -= cluster.length;
+      if (place(i + 1)) return true;
+      result[g].splice(result[g].length - cluster.length);
+      room[g] += cluster.length;
+    }
+    return false;
+  }
+
+  return place(0) ? result : null;
+}
+
+function generateGroups(animate) {
+  refreshNamesFromTextarea(); // no-op unless the textarea has unapplied changes
+  const present = presentStudents();
+  if (present.length === 0) {
+    alert(studentNames.length ? "Everyone is marked absent." : "Add at least one name.");
+    return;
+  }
+
+  const sizes = groupSizes(present.length);
+  const maxSize = Math.max(...sizes);
+  const { clusters, apart } = groupConstraints(present);
+
+  const tooBig = clusters.find(c => c.length > maxSize);
+  if (tooBig) {
+    alert(`${tooBig.join(", ")} must all be in the same group, but the groups only have room for ${maxSize}. ` +
+      "Make bigger groups or change the rules.");
+    return;
+  }
+  const clash = clusters.find(c => c.some(a => c.some(b => a !== b && apart.has(namePairKey(a, b)))));
+  if (clash) {
+    alert(`${clash.join(", ")} must be in the same group, but some of them also must not be in the same group. Change the rules.`);
+    return;
+  }
+
+  // Exact even sizes first; if the "together" rules make that impossible, allow
+  // uneven groups (each at most the largest size, none empty).
+  let result = null;
+  let even = true;
+  for (let t = 0; t < 30 && !result; t++) result = makeGroups(clusters, apart, sizes);
+  if (!result) {
+    even = false;
+    for (let t = 0; t < 30 && !result; t++) {
+      const r = makeGroups(clusters, apart, sizes.map(() => maxSize));
+      if (r && r.every(g => g.length > 0)) result = r;
+    }
+  }
+  if (!result) {
+    alert("Couldn't make groups with these rules. Try other group sizes or fewer rules.");
+    return;
+  }
+
+  for (const g of result) g.sort((x, y) => x.localeCompare(y));
+  result.sort((x, y) => y.length - x.length);
+  groups = result;
+  saveSetup();
+
+  const msg = even
+    ? `Made ${describeGroupSizes(groups.map(g => g.length))}.`
+    : `Made ${groups.length} groups. Their sizes are uneven because of the "same group" rules.`;
+  setStudentTab("groups");
+  if (animate) {
+    animateGroups(() => setStatus(msg));
+  } else {
+    renderGroups();
+    setStatus(msg);
+  }
+}
+
+function stopGroupAnimation() {
+  if (groupAnimation) clearInterval(groupAnimation);
+  groupAnimation = null;
+  btnGenerate.disabled = false;
+  btnGenerateGroups.disabled = false;
+}
+
+function animateGroups(done) {
+  // Shuffle the names through the groups for a moment, then show the real groups.
+  // Only the display changes; `groups` already holds the result.
+  stopGroupAnimation();
+  btnGenerate.disabled = true;
+  btnGenerateGroups.disabled = true;
+
+  const names = groups.flat();
+  const sizes = groups.map(g => g.length);
+  let ticks = 0;
+  groupAnimation = setInterval(() => {
+    if (++ticks > 14) {
+      stopGroupAnimation();
+      renderGroups({ settle: true });
+      done();
+      return;
+    }
+    const shuffled = names.slice();
+    shuffleInPlace(shuffled);
+    let k = 0;
+    const fake = sizes.map(size => shuffled.slice(k, (k += size)));
+    renderGroupCards(groupsView, fake, { shuffling: true });
+    renderGroupCards(groupsPreview, fake, { shuffling: true });
+  }, 90);
+}
+
+function renderGroupCards(container, list, opts = {}) {
+  container.innerHTML = "";
+  container.classList.toggle("shuffling", !!opts.shuffling);
+  container.classList.toggle("settle", !!opts.settle);
+
+  if (list.length === 0) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = "No groups yet. Press \"Generate groups\".";
+    container.appendChild(p);
+    return;
+  }
+
+  const colors = Object.values(TABLE_COLORS);
+  list.forEach((group, i) => {
+    const color = colors[i % colors.length];
+    const card = document.createElement("div");
+    card.className = "group-card";
+    card.style.borderColor = color.stroke;
+
+    const head = document.createElement("div");
+    head.className = "group-head";
+    head.style.background = color.fill;
+    head.textContent = `Group ${i + 1}`;
+    card.appendChild(head);
+
+    const ul = document.createElement("ul");
+    for (const name of group) {
+      const li = document.createElement("li");
+      li.textContent = name;
+      ul.appendChild(li);
+    }
+    card.appendChild(ul);
+    container.appendChild(card);
+  });
+}
+
+function renderGroups(opts = {}) {
+  if (groupAnimation) return; // the animation renders until it's done
+  renderGroupCards(groupsPreview, groups, opts);
+  renderGroupCards(groupsView, groups, opts);
+  updateGroupSizePreview();
+}
+
+function syncGroupsWithPresent(oldPresent) {
+  // Like syncPublishedWithPresent, for groups: students no longer present leave their
+  // group, others stay. Newly present students join, in order of preference: a group
+  // with someone they must be with, a group vacated in this update (renames keep their
+  // group), then the smallest group without anyone they must be apart from.
+  // Returns a status message.
+  if (groups.length === 0) return "";
+  stopGroupAnimation();
+  const present = presentStudents();
+  const presentSet = new Set(present);
+
+  const vacated = [];
+  groups = groups.map((g, gi) => g.filter(n => {
+    if (presentSet.has(n)) return true;
+    if (oldPresent.includes(n)) vacated.push(gi);
+    return false;
+  }));
+
+  const placed = new Set(groups.flat());
+  const unplaced = present.filter(n => !placed.has(n));
+  const { apart } = groupConstraints(present);
+  const groupOf = (name) => groups.findIndex(g => g.includes(name));
+
+  for (const name of unplaced) {
+    let gi = -1;
+    for (const r of groupRules) {
+      if (r.type !== "TOGETHER") continue;
+      const other = r.a === name ? r.b : (r.b === name ? r.a : null);
+      if (other && groupOf(other) !== -1) {
+        gi = groupOf(other);
+        break;
+      }
+    }
+    if (gi === -1 && vacated.length) gi = vacated.shift();
+    if (gi === -1) {
+      const ok = groups.map((g, k) => k).filter(k => !groups[k].some(n => apart.has(namePairKey(n, name))));
+      const pool = ok.length ? ok : groups.map((g, k) => k);
+      gi = pool.reduce((best, k) => (groups[k].length < groups[best].length ? k : best), pool[0]);
+    }
+    groups[gi].push(name);
+  }
+
+  groups = groups.filter(g => g.length > 0);
+  return unplaced.length ? `Added ${unplaced.join(", ")} to a group.` : "";
+}
+
+function renderGroupRules() {
+  groupRulesList.innerHTML = "";
+  const nameOptions = studentNames.map(n => ({ value: n, label: n }));
+
+  for (const rule of groupRules) {
+    const row = document.createElement("div");
+    row.className = "restriction-row";
+    const aSel = makeSelect(nameOptions, rule.a);
+    const bSel = makeSelect(nameOptions, rule.b);
+    const tSel = makeSelect(GROUP_RULE_TYPES, rule.type);
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "secondary";
+    removeBtn.textContent = "Remove";
+
+    const sync = () => {
+      rule.a = aSel.value;
+      rule.b = bSel.value;
+      rule.type = tSel.value;
+      onGroupRulesChanged();
+    };
+    aSel.addEventListener("change", sync);
+    bSel.addEventListener("change", sync);
+    tSel.addEventListener("change", sync);
+    removeBtn.addEventListener("click", () => {
+      groupRules = groupRules.filter(r => r !== rule);
+      renderGroupRules();
+      onGroupRulesChanged();
+    });
+
+    row.append(aSel, bSel, tSel, removeBtn);
+    groupRulesList.appendChild(row);
+  }
+}
+
+function onGroupRulesChanged() {
+  // Unlike seating restrictions, this keeps the current groups; they're regenerated on request
+  saveSetup();
+  if (groups.length) setStatus("Group rules changed. Generate groups again to apply them.");
+}
+
+function addGroupRule() {
+  if (studentNames.length < 2) {
+    alert("Add at least two names first.");
+    return;
+  }
+  groupRules.push({ a: studentNames[0], b: studentNames[1], type: "APART" });
+  renderGroupRules();
+  saveSetup();
+}
+
+function readGroupSettings() {
+  groupSettings = {
+    mode: groupModeSelect.value === "count" ? "count" : "size",
+    value: Math.max(1, Math.min(99, Math.floor(Number(groupValueInput.value) || 1))),
+    useSeatingRules: groupUseSeatingInput.checked
+  };
+  updateGroupSizePreview();
+  saveSetup();
+}
+
+function setStudentTab(tab) {
+  studentTab = tab === "groups" ? "groups" : "seating";
+  const isGroups = studentTab === "groups";
+  tabSeating.classList.toggle("active", !isGroups);
+  tabGroups.classList.toggle("active", isGroups);
+  tabSeating.setAttribute("aria-selected", String(!isGroups));
+  tabGroups.setAttribute("aria-selected", String(isGroups));
+  seatingGrid.classList.toggle("hidden", isGroups);
+  groupsView.classList.toggle("hidden", !isGroups);
+  btnFlipView.classList.toggle("hidden", isGroups);
+  updateGenerateButton();
+}
+
+function updateGenerateButton() {
+  // In Student View, Generate acts on the tab that's showing
+  btnGenerate.textContent = (isStudentView && studentTab === "groups") ? "Generate groups" : "Generate";
+}
+
+function downloadGroupsPng() {
+  if (groups.length === 0) {
+    alert("There are no groups yet. Generate groups first.");
+    return;
+  }
+
+  const pad = 36;
+  const gap = 24;
+  const cardW = 400;
+  const cardPad = 20;
+  const headH = 64;
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+
+  // At most 4 cards per row, rows as even as possible
+  const cardRows = Math.ceil(groups.length / 4);
+  const perRow = Math.ceil(groups.length / cardRows);
+
+  // One name size for all groups: the largest (up to 40px) at which every name fits
+  const maxNameW = cardW - cardPad * 2;
+  let size = 40;
+  for (; size > 18; size--) {
+    ctx.font = `600 ${size}px ${PNG_FONT}`;
+    if (groups.flat().every(n => ctx.measureText(n).width <= maxNameW)) break;
+  }
+  const lineH = Math.round(size * 1.35);
+  const maxCount = Math.max(...groups.map(g => g.length));
+  const cardH = headH + cardPad * 2 + maxCount * lineH;
+
+  const gridW = perRow * cardW + (perRow - 1) * gap;
+  const width = pad * 2 + Math.max(gridW, 640);
+  const header = layoutPngHeader(ctx, chartTitle(), width - pad * 2);
+  const height = pad * 2 + header.height + cardRows * cardH + (cardRows - 1) * gap;
+
+  setupPngCanvas(canvas, ctx, width, height);
+  drawPngHeader(ctx, header, `Groups · ${new Date().toLocaleDateString()}`, pad);
+
+  const colors = Object.values(TABLE_COLORS);
+  const startX = (width - gridW) / 2;
+  const startY = pad + header.height;
+  groups.forEach((group, i) => {
+    const color = colors[i % colors.length];
+    const x = startX + (i % perRow) * (cardW + gap);
+    const y = startY + Math.floor(i / perRow) * (cardH + gap);
+
+    ctx.fillStyle = "#ffffff";
+    roundRect(ctx, x, y, cardW, cardH, 16);
+    ctx.fill();
+
+    // Coloured header band (rounded top corners only)
+    ctx.fillStyle = color.fill;
+    roundRect(ctx, x, y, cardW, headH, 16);
+    ctx.fill();
+    ctx.fillRect(x, y + headH - 16, cardW, 16);
+
+    ctx.strokeStyle = color.stroke;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(x, y + headH);
+    ctx.lineTo(x + cardW, y + headH);
+    ctx.stroke();
+    roundRect(ctx, x, y, cardW, cardH, 16);
+    ctx.stroke();
+
+    ctx.fillStyle = "#000000";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.font = `700 32px ${PNG_FONT}`;
+    ctx.fillText(`Group ${i + 1}`, x + cardPad, y + headH / 2, maxNameW);
+
+    ctx.font = `600 ${size}px ${PNG_FONT}`;
+    group.forEach((name, k) => {
+      ctx.fillText(name, x + cardPad, y + headH + cardPad + lineH / 2 + k * lineH, maxNameW);
+    });
+  });
+
+  savePng(canvas, `${fileSafeName(chartNameInput.value) || "class"}_groups`);
+}
+
+// -------------------------
 // PNG download
 // -------------------------
 
@@ -2682,45 +3429,13 @@ function downloadSeatingAsPng() {
   const gridH = trackPositions(rowHasSeat, 0).size;
   const width = pad * 2 + Math.max(gridW, 640);
 
-  // Title: as large as possible, wrapping onto a second line before shrinking.
-  const titleMaxW = width - pad * 2;
-  let titleSize = 72;
-  let titleLines = null;
-  for (; titleSize > 24; titleSize--) {
-    ctx.font = `700 ${titleSize}px ${font}`;
-    titleLines = wrapToLines(ctx, title, titleMaxW, false);
-    if (titleLines && titleLines.length <= 2) break;
-  }
-  if (!titleLines || titleLines.length > 2) titleLines = [title];
-  const titleLineH = titleSize * 1.1;
-  const dateSize = 28;
-  const titleBlockH = titleLines.length * titleLineH;
-  const headerH = titleBlockH + dateSize + 44;
-
-  const height = pad * 2 + headerH + gridH;
+  const header = layoutPngHeader(ctx, title, width - pad * 2);
+  const height = pad * 2 + header.height + gridH;
   const colX = trackPositions(colHasSeat, (width - gridW) / 2).pos;
-  const rowY = trackPositions(rowHasSeat, pad + headerH).pos;
+  const rowY = trackPositions(rowHasSeat, pad + header.height).pos;
 
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width = Math.floor(width * dpr);
-  canvas.height = Math.floor(height * dpr);
-  canvas.style.width = `${width}px`;
-  canvas.style.height = `${height}px`;
-  ctx.scale(dpr, dpr);
-
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, width, height);
-
-  ctx.textBaseline = "alphabetic";
-  ctx.fillStyle = "#000000";
-  ctx.font = `700 ${titleSize}px ${font}`;
-  titleLines.forEach((line, k) => {
-    ctx.fillText(line, pad, pad + titleSize * 0.9 + k * titleLineH, titleMaxW);
-  });
-
-  ctx.fillStyle = "#222222";
-  ctx.font = `500 ${dateSize}px ${font}`;
-  ctx.fillText(dateStr, pad, pad + titleBlockH + dateSize + 6);
+  setupPngCanvas(canvas, ctx, width, height);
+  drawPngHeader(ctx, header, dateStr, pad);
 
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
@@ -2748,9 +3463,57 @@ function downloadSeatingAsPng() {
     }
   }
 
+  savePng(canvas, fileSafeName(chartNameInput.value) || "seating_chart");
+}
+
+// Shared PNG pieces (seating chart and groups)
+
+const PNG_FONT = "system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
+
+function layoutPngHeader(ctx, title, maxWidth) {
+  // Title as large as possible, wrapping onto a second line before shrinking
+  let size = 72;
+  let lines = null;
+  for (; size > 24; size--) {
+    ctx.font = `700 ${size}px ${PNG_FONT}`;
+    lines = wrapToLines(ctx, title, maxWidth, false);
+    if (lines && lines.length <= 2) break;
+  }
+  if (!lines || lines.length > 2) lines = [title];
+  const lineH = size * 1.1;
+  const subtitleSize = 28;
+  const titleH = lines.length * lineH;
+  return { title, lines, size, lineH, titleH, subtitleSize, maxWidth, height: titleH + subtitleSize + 44 };
+}
+
+function setupPngCanvas(canvas, ctx, width, height) {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.floor(width * dpr);
+  canvas.height = Math.floor(height * dpr);
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+  ctx.scale(dpr, dpr);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+}
+
+function drawPngHeader(ctx, header, subtitle, pad) {
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = "#000000";
+  ctx.font = `700 ${header.size}px ${PNG_FONT}`;
+  header.lines.forEach((line, k) => {
+    ctx.fillText(line, pad, pad + header.size * 0.9 + k * header.lineH, header.maxWidth);
+  });
+
+  ctx.fillStyle = "#222222";
+  ctx.font = `500 ${header.subtitleSize}px ${PNG_FONT}`;
+  ctx.fillText(subtitle, pad, pad + header.titleH + header.subtitleSize + 6);
+}
+
+function savePng(canvas, baseName) {
   const a = document.createElement("a");
-  const safeDate = new Date().toISOString().slice(0, 10);
-  a.download = `${fileSafeName(chartNameInput.value) || "seating_chart"}_${safeDate}.png`;
+  a.download = `${baseName}_${new Date().toISOString().slice(0, 10)}.png`;
   a.href = canvas.toDataURL("image/png");
   a.click();
 }
@@ -2872,6 +3635,13 @@ chartNameInput.addEventListener("input", () => {
 });
 
 classSelect.addEventListener("change", () => switchToClass(classSelect.value));
+roomSelect.addEventListener("change", () => switchToRoom(roomSelect.value));
+roomNameInput.addEventListener("input", () => {
+  saveSetup();
+  renderClassSelect();
+});
+btnNewRoom.addEventListener("click", createRoom);
+btnDeleteRoom.addEventListener("click", deleteCurrentRoom);
 btnNewClass.addEventListener("click", createClass);
 btnDeleteClass.addEventListener("click", deleteCurrentClass);
 btnExport.addEventListener("click", () => exportBackup(false));
@@ -2899,7 +3669,19 @@ btnFlipView.addEventListener("click", () => {
   saveSetup();
 });
 
-btnGenerate.addEventListener("click", generateSeating);
+btnGenerate.addEventListener("click", () => {
+  if (isStudentView && studentTab === "groups") generateGroups(true);
+  else generateSeating();
+});
+
+tabSeating.addEventListener("click", () => setStudentTab("seating"));
+tabGroups.addEventListener("click", () => setStudentTab("groups"));
+
+groupValueInput.addEventListener("input", readGroupSettings);
+groupModeSelect.addEventListener("change", readGroupSettings);
+groupUseSeatingInput.addEventListener("change", readGroupSettings);
+btnAddGroupRule.addEventListener("click", addGroupRule);
+btnGenerateGroups.addEventListener("click", () => generateGroups(true));
 
 btnToggleMode.addEventListener("click", () => {
   if (isStudentView) switchToTeacherView();
@@ -2958,7 +3740,10 @@ btnClearRestrictions.addEventListener("click", () => {
   saveSetup();
 });
 
-btnDownloadPng.addEventListener("click", downloadSeatingAsPng);
+btnDownloadPng.addEventListener("click", () => {
+  if (studentTab === "groups") downloadGroupsPng();
+  else downloadSeatingAsPng();
+});
 
 // -------------------------
 // Main
@@ -2968,9 +3753,10 @@ btnDownloadPng.addEventListener("click", downloadSeatingAsPng);
   renderToolBar();
   loadStore();
   pinInput.value = store.teacherPin || "";
-  applyClassData(currentClass().data);
+  const note = applyClassData(currentClass().data);
   saveSetup();
   renderClassSelect();
+  if (note) setStatus(note);
 
   // Default to student view (as you preferred earlier)
   switchToStudentView();
