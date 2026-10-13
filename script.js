@@ -58,6 +58,7 @@ const importFile = document.getElementById("importFile");
 const namesMessages = document.getElementById("namesMessages");
 const attendanceList = document.getElementById("attendanceList");
 const btnAllPresent = document.getElementById("btnAllPresent");
+const btnClearSeating = document.getElementById("btnClearSeating");
 const leaveAbsentOutInput = document.getElementById("leaveAbsentOutInput");
 
 const btnAddRestriction = document.getElementById("btnAddRestriction");
@@ -964,6 +965,15 @@ function anyPublishedSeating() {
   return false;
 }
 
+function shownSeating() {
+  // The seating chart as students may see it (Student View and the PNG). A chart that
+  // only holds pinned students shows nothing: it would give away who the teacher placed
+  // before the rest is randomized.
+  ensureParallelArrays();
+  const onlyPins = publishedAssignment.every((name, i) => !name || fixedStudentBySeat[i] === name);
+  return onlyPins ? publishedAssignment.map(() => "") : publishedAssignment;
+}
+
 function clearPublishedSeating(reason) {
   ensureParallelArrays();
   publishedAssignment = new Array(layout.exists.length).fill("");
@@ -1310,12 +1320,13 @@ function renderStudentView() {
   seatingGrid.style.gridTemplateColumns = `repeat(${cols}, var(--cell, 90px))`;
   seatingGrid.innerHTML = "";
   seatingGrid.classList.toggle("flipped", !!studentViewFlipped);
+  const shown = shownSeating();
 
   for (let k = 0; k < rows * cols; k++) {
     const i = rcToIndex(minR + Math.floor(k / cols), minC + (k % cols), layout.cols);
     const cell = document.createElement("div");
     cell.className = "seat" + (layout.exists[i] ? "" : " empty");
-    cell.textContent = layout.exists[i] ? (publishedAssignment[i] || "") : "";
+    cell.textContent = layout.exists[i] ? (shown[i] || "") : "";
     // Smaller text for long names/words, so they wrap between words rather than inside one
     const nameHere = cell.textContent;
     const longestWord = Math.max(0, ...nameHere.split(/[\s-]+/).map(w => w.length));
@@ -3434,6 +3445,7 @@ function downloadSeatingAsPng() {
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
 
+  const shown = shownSeating();
   ctx.font = nameFont(cellSizingFont);
   let cell = minCell;
   const seatedNames = [];
@@ -3445,7 +3457,7 @@ function downloadSeatingAsPng() {
       if (!layout.exists[idx]) continue;
       rowHasSeat[r] = true;
       colHasSeat[c] = true;
-      const name = publishedAssignment[idx] || "";
+      const name = shown[idx] || "";
       if (!name) continue;
       seatedNames.push(name);
       cell = Math.max(cell, ctx.measureText(name).width + namePad);
@@ -3516,7 +3528,7 @@ function downloadSeatingAsPng() {
       ctx.fill();
       ctx.stroke();
 
-      const name = publishedAssignment[idx] || "";
+      const name = shown[idx] || "";
       if (!name) continue;
       ctx.fillStyle = "#000000";
       drawFittedName(ctx, name, x + cell / 2, y + cell / 2, box, box, nameFont, nameSize);
@@ -3792,6 +3804,15 @@ function insertPastedNames(pasted) {
 }
 
 btnAllPresent.addEventListener("click", () => setAbsent(Array.from(absentStudents), false));
+btnClearSeating.addEventListener("click", () => {
+  // Empties what students see; pins, restrictions and the room are kept
+  if (!anyPublishedSeating()) {
+    setStatus("The seating chart is already empty.");
+    return;
+  }
+  clearPublishedSeating("Seating chart cleared. Student View shows no names until you press Generate.");
+  renderSeatEditor();
+});
 leaveAbsentOutInput.addEventListener("change", saveSetup);
 
 btnAddRestriction.addEventListener("click", () => addRestrictionRow(null));
