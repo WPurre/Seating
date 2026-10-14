@@ -578,10 +578,12 @@ button.small {
     display: block !important;
   }
 
+  /* The white page margin is here, not in @page, see below */
   .print-page {
     page-break-after: always;
     break-after: page;
     text-align: center;
+    padding: 10mm;
   }
 
   .print-page:last-child {
@@ -596,7 +598,10 @@ button.small {
   }
 }
 
+/* No page margin, so the browser has no room for its own header/footer (page title,
+   date, link, page number); the margin is the .print-page padding instead. Safari may
+   still add them: untick "Print headers and footers" there. */
 @page {
   size: landscape;
-  margin: 10mm;
+  margin: 0;
 }
