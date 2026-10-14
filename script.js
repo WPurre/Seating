@@ -59,6 +59,7 @@ const namesMessages = document.getElementById("namesMessages");
 const attendanceList = document.getElementById("attendanceList");
 const btnAllPresent = document.getElementById("btnAllPresent");
 const btnClearSeating = document.getElementById("btnClearSeating");
+const btnClearSeatingStudent = document.getElementById("btnClearSeatingStudent");
 const leaveAbsentOutInput = document.getElementById("leaveAbsentOutInput");
 
 const btnAddRestriction = document.getElementById("btnAddRestriction");
@@ -3327,6 +3328,7 @@ function setStudentTab(tab) {
   seatingGrid.classList.toggle("hidden", isGroups);
   groupsView.classList.toggle("hidden", !isGroups);
   btnFlipView.classList.toggle("hidden", isGroups);
+  btnClearSeatingStudent.classList.toggle("hidden", isGroups);
   btnClearGroupsStudent.classList.toggle("hidden", !isGroups);
   if (!isGroups) fitStudentGrid();
   updateGenerateButton();
@@ -3804,7 +3806,7 @@ function insertPastedNames(pasted) {
 }
 
 btnAllPresent.addEventListener("click", () => setAbsent(Array.from(absentStudents), false));
-btnClearSeating.addEventListener("click", () => {
+function clearSeatingChart() {
   // Empties what students see; pins, restrictions and the room are kept
   if (!anyPublishedSeating()) {
     setStatus("The seating chart is already empty.");
@@ -3812,7 +3814,9 @@ btnClearSeating.addEventListener("click", () => {
   }
   clearPublishedSeating("Seating chart cleared. Student View shows no names until you press Generate.");
   renderSeatEditor();
-});
+}
+btnClearSeating.addEventListener("click", clearSeatingChart);
+btnClearSeatingStudent.addEventListener("click", clearSeatingChart);
 leaveAbsentOutInput.addEventListener("change", saveSetup);
 
 btnAddRestriction.addEventListener("click", () => addRestrictionRow(null));
