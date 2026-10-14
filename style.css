@@ -559,3 +559,44 @@ button.small {
   border-radius: 999px;
   font-size: 13px;
 }
+/* Printing all charts of a class/classroom (printCharts): only the chart pages print,
+   one per page, landscape */
+#printArea {
+  display: none;
+}
+
+@media print {
+  body.printing-charts {
+    background: #fff;
+  }
+
+  body.printing-charts > * {
+    display: none !important;
+  }
+
+  body.printing-charts > #printArea {
+    display: block !important;
+  }
+
+  .print-page {
+    page-break-after: always;
+    break-after: page;
+    text-align: center;
+  }
+
+  .print-page:last-child {
+    page-break-after: auto;
+    break-after: auto;
+  }
+
+  .print-page img {
+    max-width: 100%;
+    max-height: 180mm;
+    object-fit: contain;
+  }
+}
+
+@page {
+  size: landscape;
+  margin: 10mm;
+}

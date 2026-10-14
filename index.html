@@ -24,6 +24,7 @@
         <label>Name <input id="chartNameInput" type="text" placeholder="e.g. Class 7B"></label>
         <button id="btnNewClass" class="secondary">New class</button>
         <button id="btnDeleteClass" class="secondary">Delete class</button>
+        <button id="btnPrintClass" class="secondary" title="One page per seating chart of this class, in every classroom. Choose &quot;Save as PDF&quot; in the print dialog for a PDF.">Print class's charts</button>
         <span class="spacer"></span>
         <button id="btnExport" class="secondary" title="Save this class to a backup file named after it">Export class</button>
         <button id="btnExportAll" class="secondary" title="Save every class to one backup file">Export all</button>
@@ -35,10 +36,12 @@
         <label>Name <input id="roomNameInput" type="text" placeholder="e.g. Room 12"></label>
         <button id="btnNewRoom" class="secondary">New classroom</button>
         <button id="btnDeleteRoom" class="secondary">Delete classroom</button>
+        <button id="btnPrintRoom" class="secondary" title="One page per class with a seating chart in this classroom. Choose &quot;Save as PDF&quot; in the print dialog for a PDF.">Print classroom's charts</button>
       </div>
       <p class="hint" style="margin:10px 0 0;">
         Each class has its own names, attendance, restrictions, groups and a seating chart for every classroom. The class name is also the chart title.
         Classrooms (seats and table colours) are shared by all classes.
+        The print buttons print one page per seating chart; choose "Save as PDF" in the print dialog to get a PDF.
         Everything is stored in this browser only, so export a backup to keep it safe or to move it to another computer.
       </p>
     </div>
@@ -202,6 +205,8 @@
   <!-- Shows script errors on the page (also when script.js can't load in an old
        browser), so testers see why nothing happens instead of dead buttons -->
   <div id="errorBanner" class="error-banner hidden"></div>
+  <!-- Filled by printCharts, only visible when printing -->
+  <div id="printArea"></div>
   <script>
     window.addEventListener("error", function (e) {
       var el = document.getElementById("errorBanner");

@@ -50,6 +50,9 @@ const roomNameInput = document.getElementById("roomNameInput");
 const btnNewRoom = document.getElementById("btnNewRoom");
 const btnDeleteRoom = document.getElementById("btnDeleteRoom");
 const layoutRoomNameEl = document.getElementById("layoutRoomName");
+const btnPrintClass = document.getElementById("btnPrintClass");
+const btnPrintRoom = document.getElementById("btnPrintRoom");
+const printArea = document.getElementById("printArea");
 const btnExport = document.getElementById("btnExport");
 const btnExportAll = document.getElementById("btnExportAll");
 const btnImport = document.getElementById("btnImport");
@@ -971,8 +974,13 @@ function shownSeating() {
   // only holds pinned students shows nothing: it would give away who the teacher placed
   // before the rest is randomized.
   ensureParallelArrays();
-  const onlyPins = publishedAssignment.every((name, i) => !name || fixedStudentBySeat[i] === name);
-  return onlyPins ? publishedAssignment.map(() => "") : publishedAssignment;
+  return shownNames(publishedAssignment, fixedStudentBySeat);
+}
+
+function shownNames(names, pins) {
+  // names as students may see them: nothing if every name is a pinned student
+  const onlyPins = names.every((name, i) => !name || pins[i] === name);
+  return onlyPins ? names.map(() => "") : names;
 }
 
 function clearPublishedSeating(reason) {
@@ -1296,16 +1304,20 @@ function chartTitle() {
 }
 
 function seatBounds() {
+  return seatBoundsOf(layout.exists, layout.rows, layout.cols);
+}
+
+function seatBoundsOf(exists, gridRows, gridCols) {
   // The rows/cols that contain seats (the whole grid if there are none):
   // { minR, minC, rows, cols }
   let minR = Infinity, maxR = -1, minC = Infinity, maxC = -1;
-  for (let i = 0; i < layout.exists.length; i++) {
-    if (!layout.exists[i]) continue;
-    const { r, c } = indexToRC(i, layout.cols);
+  for (let i = 0; i < exists.length; i++) {
+    if (!exists[i]) continue;
+    const { r, c } = indexToRC(i, gridCols);
     minR = Math.min(minR, r); maxR = Math.max(maxR, r);
     minC = Math.min(minC, c); maxC = Math.max(maxC, c);
   }
-  if (maxR === -1) return { minR: 0, minC: 0, rows: layout.rows, cols: layout.cols };
+  if (maxR === -1) return { minR: 0, minC: 0, rows: gridRows, cols: gridCols };
   return { minR, minC, rows: maxR - minR + 1, cols: maxC - minC + 1 };
 }
 
@@ -3424,9 +3436,29 @@ function downloadGroupsPng() {
 
 function downloadSeatingAsPng() {
   ensureParallelArrays();
+  const canvas = drawSeatingCanvas({
+    gridRows: layout.rows,
+    gridCols: layout.cols,
+    exists: layout.exists,
+    colors: tableColorBySeat,
+    names: shownSeating(),
+    title: chartTitle(),
+    subtitle: new Date().toLocaleDateString(),
+    flipped: studentViewFlipped,
+    showColors: showColorsInput.checked
+  });
+  savePng(canvas, fileSafeName(chartNameInput.value) || "seating_chart");
+}
+
+function drawSeatingCanvas(chart) {
+  // Draws a seating chart on a new canvas and returns it. chart = { gridRows, gridCols,
+  // exists, colors, names (as students may see them), title, subtitle, flipped,
+  // showColors }; the arrays are flat, gridRows*gridCols long.
+  const { exists, colors, names: shown, flipped } = chart;
+  const gridCols = chart.gridCols;
 
   // Crop to the rows/cols that contain seats, so the chart fills the image.
-  const { minR, minC, rows, cols } = seatBounds();
+  const { minR, minC, rows, cols } = seatBoundsOf(exists, chart.gridRows, gridCols);
 
   // Every seat is the same square, sized for the longest name (between minCell and
   // maxCell; longer names wrap). Rows/cols without any seat are narrow aisles.
@@ -3439,15 +3471,10 @@ function downloadSeatingAsPng() {
   const pad = 36;
   const font = "system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
   const nameFont = (size) => `600 ${size}px ${font}`;
-  const showColors = showColorsInput.checked;
-
-  const title = chartTitle();
-  const dateStr = new Date().toLocaleDateString();
 
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
 
-  const shown = shownSeating();
   ctx.font = nameFont(cellSizingFont);
   let cell = minCell;
   const seatedNames = [];
@@ -3455,8 +3482,8 @@ function downloadSeatingAsPng() {
   const colHasSeat = new Array(cols).fill(false);
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      const idx = rcToIndex(minR + r, minC + c, layout.cols);
-      if (!layout.exists[idx]) continue;
+      const idx = rcToIndex(minR + r, minC + c, gridCols);
+      if (!exists[idx]) continue;
       rowHasSeat[r] = true;
       colHasSeat[c] = true;
       const name = shown[idx] || "";
@@ -3489,7 +3516,7 @@ function downloadSeatingAsPng() {
   // stay upright.
   function trackPositions(hasSeat, start) {
     const order = hasSeat.map((_, k) => k);
-    if (studentViewFlipped) order.reverse();
+    if (flipped) order.reverse();
     const pos = new Array(hasSeat.length);
     let next = start;
     for (const k of order) {
@@ -3503,25 +3530,25 @@ function downloadSeatingAsPng() {
   const gridH = trackPositions(rowHasSeat, 0).size;
   const width = pad * 2 + Math.max(gridW, 640);
 
-  const header = layoutPngHeader(ctx, title, width - pad * 2);
+  const header = layoutPngHeader(ctx, chart.title, width - pad * 2);
   const height = pad * 2 + header.height + gridH;
   const colX = trackPositions(colHasSeat, (width - gridW) / 2).pos;
   const rowY = trackPositions(rowHasSeat, pad + header.height).pos;
 
   setupPngCanvas(canvas, ctx, width, height);
-  drawPngHeader(ctx, header, dateStr, pad);
+  drawPngHeader(ctx, header, chart.subtitle, pad);
 
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
 
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      const idx = rcToIndex(minR + r, minC + c, layout.cols);
-      if (!layout.exists[idx]) continue;
+      const idx = rcToIndex(minR + r, minC + c, gridCols);
+      if (!exists[idx]) continue;
       const x = colX[c];
       const y = rowY[r];
 
-      const color = showColors ? TABLE_COLORS[tableColorBySeat[idx]] : null;
+      const color = chart.showColors ? TABLE_COLORS[colors[idx]] : null;
       ctx.fillStyle = color ? color.fill : "#ffffff";
       ctx.strokeStyle = color ? color.stroke : "#222222";
       ctx.lineWidth = 3;
@@ -3537,7 +3564,7 @@ function downloadSeatingAsPng() {
     }
   }
 
-  savePng(canvas, fileSafeName(chartNameInput.value) || "seating_chart");
+  return canvas;
 }
 
 // Shared PNG pieces (seating chart and groups)
@@ -3584,6 +3611,86 @@ function drawPngHeader(ctx, header, subtitle, pad) {
   ctx.font = `500 ${header.subtitleSize}px ${PNG_FONT}`;
   ctx.fillText(subtitle, pad, pad + header.titleH + header.subtitleSize + 6);
 }
+
+// Printing all seating charts of a class or a classroom: one page per chart, drawn like
+// the PNG. The browser's print dialog can also save them as one PDF.
+
+let printingCharts = false; // body.printing-charts is only for our own print
+
+function storedChart(cls, room, dateStr) {
+  // A class's saved chart for a room as drawSeatingCanvas input (as students may see
+  // it), or null if there's nothing to show
+  const data = cls.data || {};
+  const saved = data.charts && data.charts[room.id];
+  if (!saved) return null;
+  const names = parseNames(typeof data.namesText === "string" ? data.namesText : "");
+  const seats = arrayFromCellMap(saved.seats, room.rows, room.cols)
+    .map((name, i) => (room.layoutExists[i] && names.includes(name)) ? name : "");
+  const shown = shownNames(seats, arrayFromCellMap(saved.pins, room.rows, room.cols));
+  if (!shown.some(Boolean)) return null;
+  return {
+    gridRows: room.rows,
+    gridCols: room.cols,
+    exists: room.layoutExists,
+    colors: room.tableColorBySeat,
+    names: shown,
+    title: className(data),
+    subtitle: `${roomName(room)} · ${dateStr}`,
+    flipped: studentViewFlipped,
+    showColors: data.showColors !== false
+  };
+}
+
+function printCharts(forClass) {
+  // forClass: the current class in every classroom; otherwise every class in the
+  // current classroom
+  saveSetup();
+  const dateStr = new Date().toLocaleDateString();
+  const cls = currentClass();
+  const room = currentRoom();
+  const pairs = forClass ? store.rooms.map(r => [cls, r]) : store.classes.map(c => [c, room]);
+  const charts = pairs.map(([c, r]) => storedChart(c, r, dateStr)).filter(Boolean);
+  if (charts.length === 0) {
+    alert(forClass
+      ? `${className(cls.data)} has no seating charts yet. Press Generate first.`
+      : `No class has a seating chart in ${roomName(room)} yet. Press Generate first.`);
+    return;
+  }
+
+  printArea.innerHTML = "";
+  const loads = charts.map(chart => new Promise(resolve => {
+    const page = document.createElement("div");
+    page.className = "print-page";
+    const img = document.createElement("img");
+    img.alt = `${chart.title}, ${chart.subtitle}`;
+    img.onload = resolve;
+    img.onerror = resolve;
+    img.src = drawSeatingCanvas(chart).toDataURL("image/png");
+    page.appendChild(img);
+    printArea.appendChild(page);
+  }));
+
+  Promise.all(loads).then(() => {
+    printingCharts = true;
+    document.body.classList.add("printing-charts");
+    setStatus(`Printing ${charts.length} seating chart(s). Choose "Save as PDF" in the print dialog to get a PDF.`);
+    window.print();
+  });
+}
+
+function endChartPrint() {
+  printingCharts = false;
+  document.body.classList.remove("printing-charts");
+  printArea.innerHTML = "";
+}
+
+// A normal print (Ctrl+P) prints the page itself, not leftover charts
+window.addEventListener("beforeprint", () => {
+  if (!printingCharts) document.body.classList.remove("printing-charts");
+});
+window.addEventListener("afterprint", () => {
+  if (printingCharts) endChartPrint();
+});
 
 function savePng(canvas, baseName) {
   const a = document.createElement("a");
@@ -3722,6 +3829,8 @@ roomNameInput.addEventListener("input", () => {
   renderClassSelect();
 });
 btnNewRoom.addEventListener("click", createRoom);
+btnPrintClass.addEventListener("click", () => printCharts(true));
+btnPrintRoom.addEventListener("click", () => printCharts(false));
 btnDeleteRoom.addEventListener("click", deleteCurrentRoom);
 btnNewClass.addEventListener("click", createClass);
 btnDeleteClass.addEventListener("click", deleteCurrentClass);
